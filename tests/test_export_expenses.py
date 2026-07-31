@@ -42,3 +42,22 @@ class MoneyTests(unittest.TestCase):
 
     def test_negative(self):
         self.assertEqual(ee.scale_amount(-5, 2), "-0.05")
+
+
+class NamingTests(unittest.TestCase):
+    def test_sanitize_strips_separators(self):
+        self.assertEqual(ee.sanitize_filename("a/b\\c:d.pdf"), "a_b_c_d.pdf")
+
+    def test_sanitize_empty_fallback(self):
+        self.assertEqual(ee.sanitize_filename("   "), "receipt")
+
+    def test_zip_namer_dedupes(self):
+        namer = ee.ZipNamer()
+        self.assertEqual(namer.allocate("r.pdf"), "r.pdf")
+        self.assertEqual(namer.allocate("r.pdf"), "r_1.pdf")
+        self.assertEqual(namer.allocate("r.pdf"), "r_2.pdf")
+
+    def test_zip_namer_dedupes_no_extension(self):
+        namer = ee.ZipNamer()
+        self.assertEqual(namer.allocate("receipt"), "receipt")
+        self.assertEqual(namer.allocate("receipt"), "receipt_1")
