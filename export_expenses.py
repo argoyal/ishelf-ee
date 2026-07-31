@@ -8,6 +8,7 @@ import typing
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 CSV_COLUMNS = ["expense_number", "expense_date", "amount", "currency", "notes", "receipt_file"]
 
@@ -216,3 +217,62 @@ def resolve_customer_id(client, name):
     listing = "\n".join("  %s — %s" % (c.get("id"), c.get("name")) for c in candidates)
     raise LookupError(
         "Multiple customers match %r. Rerun with --customer-id <id>:\n%s" % (name, listing))
+
+
+ExportSummary = typing.NamedTuple("ExportSummary", [
+    ("expense_count", int), ("receipts_downloaded", int),
+    ("receipt_failures", list), ("csv_path", str), ("zip_path", typing.Optional[str]),
+])
+
+
+def run_export(client, *, customer_id, client_label, start_date, end_date, out_dir, dry_run=False):
+    expenses = client.list_expenses(
+        customer_id, to_api_date(start_date), to_api_date(end_date))
+    stem = "%s_%s-%s" % (
+        sanitize_filename(client_label),
+        to_filename_date(start_date), to_filename_date(end_date))
+    csv_path = os.path.join(out_dir, stem + ".csv")
+    zip_path = os.path.join(out_dir, stem + "_receipts.zip")
+
+    namer = ZipNamer()
+    rows = []
+    stored = []  # (name, bytes)
+    failures = []
+    receipts_available = 0
+
+    for expense in expenses:
+        meta = expense.get("attachment_receipt_meta")
+        receipt_file = ""
+        if meta:
+            receipts_available += 1
+            entry = namer.allocate("%s__%s" % (
+                expense.get("expense_number") or expense.get("id"),
+                meta.get("file_name") or "receipt"))
+            if dry_run:
+                receipt_file = entry
+            else:
+                try:
+                    data = client.download_receipt(expense["id"])
+                    stored.append((entry, data))
+                    receipt_file = entry
+                except Exception as err:  # noqa: BLE001 - report, don't abort
+                    failures.append((expense.get("expense_number") or expense.get("id"), str(err)))
+        rows.append(expense_to_row(expense, receipt_file))
+
+    downloaded = receipts_available if dry_run else len(stored)
+
+    if not dry_run:
+        os.makedirs(out_dir, exist_ok=True)
+        write_csv(rows, csv_path)
+        if stored:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for name, data in stored:
+                    zf.writestr(name, data)
+        else:
+            zip_path = None
+    else:
+        zip_path = zip_path if receipts_available else None
+
+    return ExportSummary(
+        expense_count=len(expenses), receipts_downloaded=downloaded,
+        receipt_failures=failures, csv_path=csv_path, zip_path=zip_path)

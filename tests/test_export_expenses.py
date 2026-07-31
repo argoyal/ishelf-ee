@@ -6,6 +6,7 @@ import json as _json
 import os
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 import export_expenses as ee
 
@@ -257,3 +258,82 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(LookupError) as ctx:
             ee.resolve_customer_id(client, "Acme")
         self.assertIn("--customer-id", str(ctx.exception))
+
+
+class _ExportClient:
+    def __init__(self, expenses, receipts=None, fail_ids=()):
+        self._expenses = expenses
+        self._receipts = receipts or {}
+        self._fail_ids = set(fail_ids)
+
+    def list_expenses(self, customer_id, from_date, to_date):
+        return self._expenses
+
+    def download_receipt(self, expense_id):
+        if expense_id in self._fail_ids:
+            raise ee.ApiError("boom", status=500)
+        return self._receipts[expense_id]
+
+
+def _exp(id, number, has_receipt, file_name="r.pdf"):
+    e = {"id": id, "expense_number": number, "expense_date": "2025-04-10",
+         "amount": 1000, "notes": "n", "currency": {"code": "USD", "precision": 2}}
+    e["attachment_receipt_meta"] = {"file_name": file_name} if has_receipt else None
+    return e
+
+
+class RunExportTests(unittest.TestCase):
+    def _out(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        return d
+
+    def test_writes_csv_and_zip(self):
+        client = _ExportClient(
+            [_exp(1, "EXP-1", True), _exp(2, "EXP-2", False)],
+            receipts={1: b"BYTES"})
+        out = self._out()
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Acme",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 6, 30),
+            out_dir=out)
+        self.assertEqual(summary.expense_count, 2)
+        self.assertEqual(summary.receipts_downloaded, 1)
+        self.assertTrue(summary.csv_path.endswith("Acme_01042025-30062025.csv"))
+        self.assertTrue(os.path.exists(summary.zip_path))
+        with zipfile.ZipFile(summary.zip_path) as z:
+            self.assertEqual(z.namelist(), ["EXP-1__r.pdf"])
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        self.assertEqual(rows[0]["receipt_file"], "EXP-1__r.pdf")
+        self.assertEqual(rows[1]["receipt_file"], "")
+
+    def test_no_receipts_skips_zip(self):
+        client = _ExportClient([_exp(1, "EXP-1", False)])
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Acme",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 4, 2),
+            out_dir=self._out())
+        self.assertIsNone(summary.zip_path)
+        self.assertTrue(os.path.exists(summary.csv_path))
+
+    def test_download_failure_recorded_not_fatal(self):
+        client = _ExportClient([_exp(1, "EXP-1", True)], fail_ids=[1])
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Acme",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 4, 2),
+            out_dir=self._out())
+        self.assertEqual(summary.receipts_downloaded, 0)
+        self.assertEqual(len(summary.receipt_failures), 1)
+        self.assertIsNone(summary.zip_path)
+
+    def test_dry_run_writes_nothing(self):
+        client = _ExportClient([_exp(1, "EXP-1", True)], receipts={1: b"BYTES"})
+        out = self._out()
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Acme",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 4, 2),
+            out_dir=out, dry_run=True)
+        self.assertEqual(summary.expense_count, 1)
+        self.assertFalse(os.path.exists(summary.csv_path))
+        self.assertEqual(os.listdir(out), [])
