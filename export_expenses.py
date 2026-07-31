@@ -21,3 +21,13 @@ def to_filename_date(d):
 def validate_range(start, end):
     if start > end:
         raise ValueError("start date must not be after end date")
+
+
+def scale_amount(minor, precision=2):
+    minor = int(minor)
+    precision = int(precision)
+    if precision <= 0:
+        return str(minor)
+    sign = "-" if minor < 0 else ""
+    digits = str(abs(minor)).rjust(precision + 1, "0")
+    return "%s%s.%s" % (sign, digits[:-precision], digits[-precision:])

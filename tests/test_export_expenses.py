@@ -25,3 +25,20 @@ class DateTests(unittest.TestCase):
     def test_validate_range_rejects_reversed(self):
         with self.assertRaises(ValueError):
             ee.validate_range(datetime.date(2025, 4, 2), datetime.date(2025, 4, 1))
+
+
+class MoneyTests(unittest.TestCase):
+    def test_two_decimals(self):
+        self.assertEqual(ee.scale_amount(123456, 2), "1234.56")
+
+    def test_pads_leading_zeros(self):
+        self.assertEqual(ee.scale_amount(5, 2), "0.05")
+
+    def test_zero_precision(self):
+        self.assertEqual(ee.scale_amount(100, 0), "100")
+
+    def test_precision_as_string(self):
+        self.assertEqual(ee.scale_amount("5000", "2"), "50.00")
+
+    def test_negative(self):
+        self.assertEqual(ee.scale_amount(-5, 2), "-0.05")
