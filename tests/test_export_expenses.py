@@ -1,4 +1,5 @@
 # tests/test_export_expenses.py
+import csv as _csv
 import datetime
 import os
 import tempfile
@@ -99,3 +100,46 @@ class ConfigTests(unittest.TestCase):
         os.environ["INVOICESHELF_URL"] = "https://env.example"
         self.addCleanup(os.environ.pop, "INVOICESHELF_URL", None)
         self.assertEqual(ee.load_config(path).url, "https://env.example")
+
+
+class RowCsvTests(unittest.TestCase):
+    def _expense(self):
+        return {
+            "expense_number": "EXP-000001",
+            "expense_date": "2025-04-15",
+            "amount": 123456,
+            "notes": "Taxi, airport",
+            "currency": {"code": "USD", "precision": 2},
+        }
+
+    def test_expense_to_row(self):
+        row = ee.expense_to_row(self._expense(), "EXP-000001__taxi.pdf")
+        self.assertEqual(row, {
+            "expense_number": "EXP-000001",
+            "expense_date": "2025-04-15",
+            "amount": "1234.56",
+            "currency": "USD",
+            "notes": "Taxi, airport",
+            "receipt_file": "EXP-000001__taxi.pdf",
+        })
+
+    def test_expense_to_row_missing_currency_defaults_precision(self):
+        exp = self._expense()
+        exp.pop("currency")
+        exp["amount"] = 5000
+        row = ee.expense_to_row(exp, "")
+        self.assertEqual(row["amount"], "50.00")
+        self.assertEqual(row["currency"], "")
+        self.assertEqual(row["receipt_file"], "")
+
+    def test_write_csv_roundtrip(self):
+        rows = [ee.expense_to_row(self._expense(), "r.pdf")]
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        ee.write_csv(rows, path)
+        with open(path, newline="", encoding="utf-8") as f:
+            got = list(_csv.DictReader(f))
+        self.assertEqual(list(got[0].keys()), ee.CSV_COLUMNS)
+        self.assertEqual(got[0]["amount"], "1234.56")
+        self.assertEqual(got[0]["notes"], "Taxi, airport")

@@ -1,4 +1,5 @@
 """InvoiceShelf expense exporter — CSV + receipts zip for a client and date range."""
+import csv
 import datetime
 import os
 import re
@@ -100,3 +101,26 @@ class ZipNamer:
                 self._used.add(candidate)
                 return candidate
             i += 1
+
+
+def expense_to_row(expense, receipt_file):
+    currency = expense.get("currency") or {}
+    precision = currency.get("precision", 2)
+    if precision in (None, ""):
+        precision = 2
+    return {
+        "expense_number": expense.get("expense_number") or "",
+        "expense_date": expense.get("expense_date") or "",
+        "amount": scale_amount(expense.get("amount") or 0, precision),
+        "currency": currency.get("code") or "",
+        "notes": expense.get("notes") or "",
+        "receipt_file": receipt_file or "",
+    }
+
+
+def write_csv(rows, path):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
