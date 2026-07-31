@@ -1,5 +1,7 @@
 # tests/test_export_expenses.py
 import datetime
+import os
+import tempfile
 import unittest
 import export_expenses as ee
 
@@ -61,3 +63,39 @@ class NamingTests(unittest.TestCase):
         namer = ee.ZipNamer()
         self.assertEqual(namer.allocate("receipt"), "receipt")
         self.assertEqual(namer.allocate("receipt"), "receipt_1")
+
+
+class ConfigTests(unittest.TestCase):
+    def _write(self, text):
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_loads_and_defaults_company(self):
+        path = self._write(
+            "INVOICESHELF_URL=https://x.example\n"
+            "# comment\n"
+            "INVOICESHELF_EMAIL=me@example.com\n"
+            "INVOICESHELF_PASSWORD=secret\n"
+        )
+        cfg = ee.load_config(path)
+        self.assertEqual(cfg.url, "https://x.example")
+        self.assertEqual(cfg.email, "me@example.com")
+        self.assertEqual(cfg.company_id, "1")
+
+    def test_missing_required_raises(self):
+        path = self._write("INVOICESHELF_URL=https://x.example\n")
+        with self.assertRaises(ValueError):
+            ee.load_config(path)
+
+    def test_env_overrides_file(self):
+        path = self._write(
+            "INVOICESHELF_URL=https://file.example\n"
+            "INVOICESHELF_EMAIL=me@example.com\n"
+            "INVOICESHELF_PASSWORD=secret\n"
+        )
+        os.environ["INVOICESHELF_URL"] = "https://env.example"
+        self.addCleanup(os.environ.pop, "INVOICESHELF_URL", None)
+        self.assertEqual(ee.load_config(path).url, "https://env.example")
