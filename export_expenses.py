@@ -323,6 +323,8 @@ def main(argv=None):
 
     print("Expenses: %d | Receipts: %d | Failures: %d"
           % (summary.expense_count, summary.receipts_downloaded, len(summary.receipt_failures)))
+    if summary.expense_count == 0:
+        print("0 expenses in range.")
     if args.dry_run:
         print("Dry run — nothing written. CSV would be: %s" % summary.csv_path)
     else:

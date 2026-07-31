@@ -338,6 +338,23 @@ class RunExportTests(unittest.TestCase):
         self.assertFalse(os.path.exists(summary.csv_path))
         self.assertEqual(os.listdir(out), [])
 
+    def test_zero_expenses_writes_header_only_csv_no_zip(self):
+        client = _ExportClient([])
+        out = self._out()
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Acme",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 4, 2),
+            out_dir=out)
+        self.assertEqual(summary.expense_count, 0)
+        self.assertIsNone(summary.zip_path)
+        self.assertTrue(os.path.exists(summary.csv_path))
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        self.assertEqual(rows, [])  # header only, no data rows
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            header = f.readline().strip()
+        self.assertEqual(header, ",".join(ee.CSV_COLUMNS))
+
 
 class CliTests(unittest.TestCase):
     def test_parser_reads_args(self):
@@ -374,3 +391,18 @@ class CliTests(unittest.TestCase):
              mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
             rc = ee.main(["--client", "Ghost", "--start", "01042025", "--end", "30062025"])
         self.assertEqual(rc, 1)
+
+    def test_customer_id_skips_name_resolution(self):
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out)
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _ExportClient([_exp(1, "EXP-1", False)])
+        fake.login = lambda: "tok"
+        def _boom(name):
+            raise AssertionError("find_customers must not be called when --customer-id is given")
+        fake.find_customers = _boom
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--customer-id", "7", "--start", "01042025",
+                          "--end", "30062025", "--out", out])
+        self.assertEqual(rc, 0)
