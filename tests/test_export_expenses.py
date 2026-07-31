@@ -223,3 +223,37 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(ee.ApiError) as ctx:
                 client.login()
         self.assertEqual(ctx.exception.status, 401)
+
+
+class _StubClient:
+    def __init__(self, customers):
+        self._customers = customers
+
+    def find_customers(self, name):
+        return self._customers
+
+
+class ResolveTests(unittest.TestCase):
+    def test_single_match(self):
+        client = _StubClient([{"id": 12, "name": "Acme Corp"}])
+        self.assertEqual(ee.resolve_customer_id(client, "acme"), 12)
+
+    def test_exact_match_wins_over_substring(self):
+        client = _StubClient([
+            {"id": 1, "name": "Acme"},
+            {"id": 2, "name": "Acme Corp"},
+        ])
+        self.assertEqual(ee.resolve_customer_id(client, "Acme"), 1)
+
+    def test_zero_matches_raises(self):
+        with self.assertRaises(LookupError):
+            ee.resolve_customer_id(_StubClient([]), "Nobody")
+
+    def test_ambiguous_raises_with_ids(self):
+        client = _StubClient([
+            {"id": 1, "name": "Acme One"},
+            {"id": 2, "name": "Acme Two"},
+        ])
+        with self.assertRaises(LookupError) as ctx:
+            ee.resolve_customer_id(client, "Acme")
+        self.assertIn("--customer-id", str(ctx.exception))

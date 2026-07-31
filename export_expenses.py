@@ -201,3 +201,18 @@ class InvoiceShelfClient:
 
     def download_receipt(self, expense_id):
         return self._request("GET", "/expenses/%s/show/receipt" % expense_id, raw=True)
+
+
+def resolve_customer_id(client, name):
+    customers = client.find_customers(name)
+    if not customers:
+        raise LookupError("No customer found matching %r." % name)
+    exact = [c for c in customers if (c.get("name") or "").lower() == name.lower()]
+    if len(exact) == 1:
+        return int(exact[0]["id"])
+    if len(exact) == 0 and len(customers) == 1:
+        return int(customers[0]["id"])
+    candidates = exact if exact else customers
+    listing = "\n".join("  %s — %s" % (c.get("id"), c.get("name")) for c in candidates)
+    raise LookupError(
+        "Multiple customers match %r. Rerun with --customer-id <id>:\n%s" % (name, listing))
