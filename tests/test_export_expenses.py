@@ -337,3 +337,40 @@ class RunExportTests(unittest.TestCase):
         self.assertEqual(summary.expense_count, 1)
         self.assertFalse(os.path.exists(summary.csv_path))
         self.assertEqual(os.listdir(out), [])
+
+
+class CliTests(unittest.TestCase):
+    def test_parser_reads_args(self):
+        parser = ee.build_arg_parser()
+        args = parser.parse_args(
+            ["--client", "Acme", "--start", "01042025", "--end", "30062025", "--dry-run"])
+        self.assertEqual(args.client, "Acme")
+        self.assertEqual(args.start, "01042025")
+        self.assertTrue(args.dry_run)
+
+    def test_main_dry_run_end_to_end(self):
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out)
+
+        cfg = ee.Config(url="https://x.example", email="me@example.com",
+                        password="secret", company_id="1")
+        fake = _ExportClient([_exp(1, "EXP-1", True)], receipts={1: b"B"})
+        fake.login = lambda: "tok"
+        fake.find_customers = lambda name: [{"id": 5, "name": "Acme"}]
+
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--client", "Acme", "--start", "01042025",
+                          "--end", "30062025", "--out", out, "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(os.listdir(out), [])  # dry-run writes nothing
+
+    def test_main_reports_error_nonzero(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _ExportClient([])
+        fake.login = lambda: "tok"
+        fake.find_customers = lambda name: []
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--client", "Ghost", "--start", "01042025", "--end", "30062025"])
+        self.assertEqual(rc, 1)

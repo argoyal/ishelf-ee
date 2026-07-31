@@ -1,9 +1,11 @@
 """InvoiceShelf expense exporter — CSV + receipts zip for a client and date range."""
+import argparse
 import csv
 import datetime
 import json
 import os
 import re
+import sys
 import typing
 import urllib.error
 import urllib.parse
@@ -276,3 +278,60 @@ def run_export(client, *, customer_id, client_label, start_date, end_date, out_d
     return ExportSummary(
         expense_count=len(expenses), receipts_downloaded=downloaded,
         receipt_failures=failures, csv_path=csv_path, zip_path=zip_path)
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Export InvoiceShelf expenses (CSV) and receipts (zip) for a client and date range.")
+    parser.add_argument("--client", help="Client (customer) name to export.")
+    parser.add_argument("--customer-id", type=int, default=None,
+                        help="Use this customer id directly, skipping name lookup.")
+    parser.add_argument("--start", required=True, help="Start date, inclusive, DDMMYYYY.")
+    parser.add_argument("--end", required=True, help="End date, inclusive, DDMMYYYY.")
+    parser.add_argument("--out", default="exports", help="Output directory (default: exports).")
+    parser.add_argument("--config", default="config.env", help="Path to config env file.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="List what would be exported; download and write nothing.")
+    return parser
+
+
+def main(argv=None):
+    args = build_arg_parser().parse_args(argv)
+    try:
+        if not args.client and args.customer_id is None:
+            raise ValueError("Provide --client NAME or --customer-id ID.")
+        start = parse_ddmmyyyy(args.start)
+        end = parse_ddmmyyyy(args.end)
+        validate_range(start, end)
+
+        config = load_config(args.config)
+        client = InvoiceShelfClient(config)
+        client.login()
+
+        if args.customer_id is not None:
+            customer_id = args.customer_id
+        else:
+            customer_id = resolve_customer_id(client, args.client)
+
+        label = args.client or ("customer-%s" % customer_id)
+        summary = run_export(
+            client, customer_id=customer_id, client_label=label,
+            start_date=start, end_date=end, out_dir=args.out, dry_run=args.dry_run)
+    except (ValueError, LookupError, ApiError) as err:
+        print("Error: %s" % err, file=sys.stderr)
+        return 1
+
+    print("Expenses: %d | Receipts: %d | Failures: %d"
+          % (summary.expense_count, summary.receipts_downloaded, len(summary.receipt_failures)))
+    if args.dry_run:
+        print("Dry run — nothing written. CSV would be: %s" % summary.csv_path)
+    else:
+        print("CSV: %s" % summary.csv_path)
+        print("Zip: %s" % (summary.zip_path or "(none — no receipts)"))
+    for number, msg in summary.receipt_failures:
+        print("  ! receipt failed for %s: %s" % (number, msg), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
