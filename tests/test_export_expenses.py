@@ -1,10 +1,26 @@
 # tests/test_export_expenses.py
 import csv as _csv
 import datetime
+import io
+import json as _json
 import os
 import tempfile
 import unittest
+from unittest import mock
 import export_expenses as ee
+
+
+class _FakeResp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+        return False
+
+
+def _fake_json_resp(obj):
+    return _FakeResp(_json.dumps(obj).encode("utf-8"))
 
 
 class DateTests(unittest.TestCase):
@@ -143,3 +159,67 @@ class RowCsvTests(unittest.TestCase):
         self.assertEqual(list(got[0].keys()), ee.CSV_COLUMNS)
         self.assertEqual(got[0]["amount"], "1234.56")
         self.assertEqual(got[0]["notes"], "Taxi, airport")
+
+
+class ClientTests(unittest.TestCase):
+    def _client(self):
+        return ee.InvoiceShelfClient(
+            ee.Config(url="https://x.example/", email="me@example.com",
+                      password="secret", company_id="1"))
+
+    def test_login_sets_token_and_sends_username(self):
+        client = self._client()
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = _json.loads(req.data.decode("utf-8"))
+            return _fake_json_resp({"type": "Bearer", "token": "tok123"})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            token = client.login()
+
+        self.assertEqual(token, "tok123")
+        self.assertEqual(client.token, "tok123")
+        self.assertTrue(captured["url"].endswith("/api/v1/auth/login"))
+        self.assertEqual(captured["body"]["username"], "me@example.com")
+        self.assertEqual(captured["body"]["device_name"], "expense-exporter")
+
+    def test_list_expenses_sends_company_header_and_filters(self):
+        client = self._client()
+        client.token = "tok123"
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            return _fake_json_resp({"data": [{"id": 7}], "meta": {}})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            data = client.list_expenses(5, "2025-04-01", "2025-06-30")
+
+        self.assertEqual(data, [{"id": 7}])
+        self.assertIn("customer_id=5", captured["url"])
+        self.assertIn("from_date=2025-04-01", captured["url"])
+        self.assertIn("to_date=2025-06-30", captured["url"])
+        self.assertIn("limit=all", captured["url"])
+        self.assertEqual(captured["headers"]["company"], "1")
+        self.assertEqual(captured["headers"]["authorization"], "Bearer tok123")
+
+    def test_download_receipt_returns_bytes(self):
+        client = self._client()
+        client.token = "tok123"
+        with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _FakeResp(b"PDFBYTES")):
+            self.assertEqual(client.download_receipt(9), b"PDFBYTES")
+
+    def test_http_error_becomes_apierror(self):
+        import urllib.error
+        client = self._client()
+
+        def raise_401(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b'{"message":"bad"}'))
+
+        with mock.patch("urllib.request.urlopen", raise_401):
+            with self.assertRaises(ee.ApiError) as ctx:
+                client.login()
+        self.assertEqual(ctx.exception.status, 401)

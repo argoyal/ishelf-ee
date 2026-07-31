@@ -1,9 +1,13 @@
 """InvoiceShelf expense exporter — CSV + receipts zip for a client and date range."""
 import csv
 import datetime
+import json
 import os
 import re
 import typing
+import urllib.error
+import urllib.parse
+import urllib.request
 
 CSV_COLUMNS = ["expense_number", "expense_date", "amount", "currency", "notes", "receipt_file"]
 
@@ -124,3 +128,76 @@ def write_csv(rows, path):
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+_TIMEOUT = 60
+
+
+class ApiError(Exception):
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
+class InvoiceShelfClient:
+    def __init__(self, config):
+        self.config = config
+        self.base = config.url.rstrip("/") + "/api/v1"
+        self.token = None
+
+    def _request(self, method, path, query=None, body=None, auth=True, raw=False):
+        url = self.base + path
+        if query:
+            url += "?" + urllib.parse.urlencode(query)
+        data = None
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if auth:
+            headers["company"] = str(self.config.company_id)
+            if self.token:
+                headers["Authorization"] = "Bearer " + self.token
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                payload = resp.read()
+        except urllib.error.HTTPError as err:
+            detail = ""
+            try:
+                detail = err.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            raise ApiError("HTTP %s for %s: %s" % (err.code, url, detail), status=err.code)
+        except urllib.error.URLError as err:
+            raise ApiError("Could not reach %s: %s" % (url, err.reason))
+        if raw:
+            return payload
+        return json.loads(payload.decode("utf-8"))
+
+    def login(self):
+        resp = self._request("POST", "/auth/login", body={
+            "username": self.config.email,
+            "password": self.config.password,
+            "device_name": "expense-exporter",
+        }, auth=False)
+        self.token = resp.get("token")
+        if not self.token:
+            raise ApiError("Login succeeded but no token returned")
+        return self.token
+
+    def find_customers(self, name):
+        resp = self._request("GET", "/customers", query={"search": name, "limit": "all"})
+        return resp.get("data", [])
+
+    def list_expenses(self, customer_id, from_date, to_date):
+        resp = self._request("GET", "/expenses", query={
+            "customer_id": customer_id,
+            "from_date": from_date,
+            "to_date": to_date,
+            "limit": "all",
+        })
+        return resp.get("data", [])
+
+    def download_receipt(self, expense_id):
+        return self._request("GET", "/expenses/%s/show/receipt" % expense_id, raw=True)
