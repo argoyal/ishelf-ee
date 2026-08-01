@@ -135,6 +135,14 @@ def write_csv(rows, path):
 
 _TIMEOUT = 60
 
+# Some InvoiceShelf instances sit behind Cloudflare, whose bot rules ban the
+# default "Python-urllib/x.y" User-Agent (error 1010). Present a normal browser
+# UA instead. Override with the INVOICESHELF_USER_AGENT env var if that is also
+# filtered.
+_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/125.0.0.0 Safari/537.36")
+
 
 class ApiError(Exception):
     def __init__(self, message, status=None):
@@ -150,13 +158,14 @@ class InvoiceShelfClient:
         # Mutable so a resolved --company can override the config default before
         # any company-scoped call (customers, expenses, receipts) is made.
         self.company_id = config.company_id
+        self.user_agent = os.environ.get("INVOICESHELF_USER_AGENT") or _USER_AGENT
 
     def _request(self, method, path, query=None, body=None, auth=True, raw=False):
         url = self.base + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
         data = None
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "User-Agent": self.user_agent}
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
