@@ -1,4 +1,11 @@
 config.env
+.ishelf-ee.env
 exports/
 __pycache__/
 *.pyc
+
+# build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.venv/

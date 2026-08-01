@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ishelf-ee"
+version = "0.1.0"
+description = "Export InvoiceShelf expenses to CSV and bundle their receipts into a zip, for a client and date range."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Arpit Goyal", email = "hunterarpit@gmail.com" }]
+keywords = ["invoiceshelf", "expenses", "receipts", "csv", "export", "bookkeeping", "accounting"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Topic :: Office/Business :: Financial :: Accounting",
+]
+dependencies = []
+
+[project.scripts]
+ee = "ishelf_ee:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ishelf_ee"]
+
+[tool.hatch.build.targets.sdist]
+# Ship only source, tests, and the config TEMPLATE — never a real config.env,
+# which holds credentials and is git-ignored.
+include = [
+    "ishelf_ee",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "config.env.example",
+]

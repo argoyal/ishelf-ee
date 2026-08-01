@@ -8,7 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from unittest import mock
-import export_expenses as ee
+import ishelf_ee as ee
 
 
 class _FakeResp(io.BytesIO):
@@ -117,6 +117,26 @@ class ConfigTests(unittest.TestCase):
         os.environ["INVOICESHELF_URL"] = "https://env.example"
         self.addCleanup(os.environ.pop, "INVOICESHELF_URL", None)
         self.assertEqual(ee.load_config(path).url, "https://env.example")
+
+
+class ConfigDiscoveryTests(unittest.TestCase):
+    def test_explicit_path_wins(self):
+        self.assertEqual(ee.find_config_file("/tmp/whatever.env"), "/tmp/whatever.env")
+
+    def test_env_var_candidate_used_when_exists(self):
+        fd, path = tempfile.mkstemp(suffix=".env")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        os.environ["INVOICESHELF_CONFIG"] = path
+        self.addCleanup(os.environ.pop, "INVOICESHELF_CONFIG", None)
+        self.assertEqual(ee.find_config_file(), path)
+
+    def test_returns_none_when_no_candidate_exists(self):
+        os.environ.pop("INVOICESHELF_CONFIG", None)
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        with mock.patch.object(ee, "_config_candidates", lambda: [os.path.join(d, "nope.env")]):
+            self.assertIsNone(ee.find_config_file())
 
 
 class RowCsvTests(unittest.TestCase):
