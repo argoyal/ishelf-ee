@@ -26,5 +26,18 @@ company id (`1`) is used, and InvoiceShelf falls back to your first company if t
 id isn't yours. On an ambiguous or unknown name, the tool lists the available
 companies as `id — name` so you can pick.
 
+## Troubleshooting
+
+**Cloudflare "Error 1010: Access denied" / HTTP 403 on login.** The instance is
+behind Cloudflare, which bans the default Python User-Agent. The script already
+sends a browser User-Agent to avoid this. If your Cloudflare config still blocks
+it, set a different one:
+
+    INVOICESHELF_USER_AGENT="Mozilla/5.0 (...)" python3 export_expenses.py ...
+
+If it persists, allowlist your own access in the Cloudflare dashboard (e.g. a WAF
+skip rule for the `/api/*` path, or turn off Bot Fight Mode for the API) — it is
+your own site.
+
 ## Tests
     python3 -m unittest discover -s tests -v

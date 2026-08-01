@@ -246,6 +246,53 @@ class ClientTests(unittest.TestCase):
 
         self.assertEqual(captured["headers"]["company"], "9")
 
+    def test_request_sends_browser_user_agent(self):
+        client = self._client()
+        client.token = "tok123"
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            return _fake_json_resp({"data": []})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            client.list_expenses(5, "2025-04-01", "2025-06-30")
+
+        ua = captured["headers"].get("user-agent", "")
+        self.assertIn("Mozilla", ua)
+        self.assertNotIn("Python-urllib", ua)
+
+    def test_login_sends_browser_user_agent(self):
+        # Login is unauthenticated but Cloudflare still filters on User-Agent,
+        # so the browser UA must be present here too.
+        client = self._client()
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            return _fake_json_resp({"type": "Bearer", "token": "t"})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            client.login()
+
+        self.assertIn("Mozilla", captured["headers"].get("user-agent", ""))
+
+    def test_user_agent_env_override(self):
+        os.environ["INVOICESHELF_USER_AGENT"] = "CustomAgent/9.9"
+        self.addCleanup(os.environ.pop, "INVOICESHELF_USER_AGENT", None)
+        client = self._client()
+        client.token = "tok123"
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            return _fake_json_resp({"data": []})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            client.list_expenses(5, "2025-04-01", "2025-06-30")
+
+        self.assertEqual(captured["headers"].get("user-agent"), "CustomAgent/9.9")
+
     def test_http_error_becomes_apierror(self):
         import urllib.error
         client = self._client()
