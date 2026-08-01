@@ -213,6 +213,39 @@ class ClientTests(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _FakeResp(b"PDFBYTES")):
             self.assertEqual(client.download_receipt(9), b"PDFBYTES")
 
+    def test_list_companies_sends_company_header(self):
+        client = self._client()
+        client.token = "tok123"
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            return _fake_json_resp({"data": [{"id": 2, "name": "Acme"}]})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            data = client.list_companies()
+
+        self.assertEqual(data, [{"id": 2, "name": "Acme"}])
+        self.assertTrue(captured["url"].endswith("/api/v1/companies"))
+        self.assertEqual(captured["headers"]["company"], "1")
+        self.assertEqual(captured["headers"]["authorization"], "Bearer tok123")
+
+    def test_company_id_is_mutable_and_used_in_header(self):
+        client = self._client()
+        client.token = "tok123"
+        client.company_id = 9  # simulate resolution overriding the config default
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            return _fake_json_resp({"data": []})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            client.list_expenses(5, "2025-04-01", "2025-06-30")
+
+        self.assertEqual(captured["headers"]["company"], "9")
+
     def test_http_error_becomes_apierror(self):
         import urllib.error
         client = self._client()
@@ -258,6 +291,47 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(LookupError) as ctx:
             ee.resolve_customer_id(client, "Acme")
         self.assertIn("--customer-id", str(ctx.exception))
+
+
+class _CompanyStubClient:
+    def __init__(self, companies):
+        self._companies = companies
+
+    def list_companies(self):
+        return self._companies
+
+
+class CompanyResolveTests(unittest.TestCase):
+    def test_single_match(self):
+        client = _CompanyStubClient([{"id": 3, "name": "My Co"}])
+        self.assertEqual(ee.resolve_company_id(client, "my co"), 3)
+
+    def test_substring_single_match(self):
+        client = _CompanyStubClient([
+            {"id": 3, "name": "My Company Ltd"},
+            {"id": 4, "name": "Other Inc"},
+        ])
+        self.assertEqual(ee.resolve_company_id(client, "my company"), 3)
+
+    def test_exact_match_wins_over_substring(self):
+        client = _CompanyStubClient([
+            {"id": 1, "name": "Acme"},
+            {"id": 2, "name": "Acme Corp"},
+        ])
+        self.assertEqual(ee.resolve_company_id(client, "Acme"), 1)
+
+    def test_zero_matches_raises(self):
+        with self.assertRaises(LookupError):
+            ee.resolve_company_id(_CompanyStubClient([{"id": 1, "name": "Acme"}]), "Nobody")
+
+    def test_ambiguous_raises_with_ids(self):
+        client = _CompanyStubClient([
+            {"id": 1, "name": "Acme One"},
+            {"id": 2, "name": "Acme Two"},
+        ])
+        with self.assertRaises(LookupError) as ctx:
+            ee.resolve_company_id(client, "Acme")
+        self.assertIn("INVOICESHELF_COMPANY_ID", str(ctx.exception))
 
 
 class _ExportClient:
@@ -391,6 +465,28 @@ class CliTests(unittest.TestCase):
              mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
             rc = ee.main(["--client", "Ghost", "--start", "01042025", "--end", "30062025"])
         self.assertEqual(rc, 1)
+
+    def test_parser_accepts_company(self):
+        args = ee.build_arg_parser().parse_args(
+            ["--company", "My Co", "--client", "Acme", "--start", "01042025", "--end", "30062025"])
+        self.assertEqual(args.company, "My Co")
+
+    def test_company_flag_resolves_and_scopes(self):
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out)
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _ExportClient([_exp(1, "EXP-1", False)])
+        fake.company_id = "1"
+        fake.login = lambda: "tok"
+        fake.list_companies = lambda: [{"id": 42, "name": "My Company"}]
+        fake.find_customers = lambda name: [{"id": 5, "name": "Acme"}]
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "My Company", "--client", "Acme",
+                          "--start", "01042025", "--end", "30062025",
+                          "--out", out, "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake.company_id, 42)  # resolved id applied to the client
 
     def test_customer_id_skips_name_resolution(self):
         out = tempfile.mkdtemp()
