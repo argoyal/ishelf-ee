@@ -147,6 +147,9 @@ class InvoiceShelfClient:
         self.config = config
         self.base = config.url.rstrip("/") + "/api/v1"
         self.token = None
+        # Mutable so a resolved --company can override the config default before
+        # any company-scoped call (customers, expenses, receipts) is made.
+        self.company_id = config.company_id
 
     def _request(self, method, path, query=None, body=None, auth=True, raw=False):
         url = self.base + path
@@ -158,7 +161,7 @@ class InvoiceShelfClient:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if auth:
-            headers["company"] = str(self.config.company_id)
+            headers["company"] = str(self.company_id)
             if self.token:
                 headers["Authorization"] = "Bearer " + self.token
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -188,6 +191,14 @@ class InvoiceShelfClient:
         if not self.token:
             raise ApiError("Login succeeded but no token returned")
         return self.token
+
+    def list_companies(self):
+        # Returns every company the authenticated user belongs to (no server-side
+        # name filter). The 'company' middleware falls back to the user's first
+        # company when the header is absent/invalid, so this call works before a
+        # specific company is chosen.
+        resp = self._request("GET", "/companies")
+        return resp.get("data", [])
 
     def find_customers(self, name):
         resp = self._request("GET", "/customers", query={"search": name, "limit": "all"})
@@ -219,6 +230,29 @@ def resolve_customer_id(client, name):
     listing = "\n".join("  %s — %s" % (c.get("id"), c.get("name")) for c in candidates)
     raise LookupError(
         "Multiple customers match %r. Rerun with --customer-id <id>:\n%s" % (name, listing))
+
+
+def resolve_company_id(client, name):
+    companies = client.list_companies()
+    lname = name.lower()
+    exact = [c for c in companies if (c.get("name") or "").lower() == lname]
+    if len(exact) == 1:
+        return int(exact[0]["id"])
+    if exact:
+        matches = exact  # >1 exact match (unusual)
+    else:
+        matches = [c for c in companies if lname in (c.get("name") or "").lower()]
+        if len(matches) == 1:
+            return int(matches[0]["id"])
+    if not matches:
+        available = "\n".join(
+            "  %s — %s" % (c.get("id"), c.get("name")) for c in companies) or "  (none)"
+        raise LookupError(
+            "No company found matching %r. Available companies:\n%s" % (name, available))
+    listing = "\n".join("  %s — %s" % (c.get("id"), c.get("name")) for c in matches)
+    raise LookupError(
+        "Multiple companies match %r. Use an exact --company name or set "
+        "INVOICESHELF_COMPANY_ID to one of:\n%s" % (name, listing))
 
 
 ExportSummary = typing.NamedTuple("ExportSummary", [
@@ -284,6 +318,9 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Export InvoiceShelf expenses (CSV) and receipts (zip) for a client and date range.")
     parser.add_argument("--client", help="Client (customer) name to export.")
+    parser.add_argument("--company", default=None,
+                        help="Company name to scope the export to (resolved to its id). "
+                             "Overrides INVOICESHELF_COMPANY_ID from config.")
     parser.add_argument("--customer-id", type=int, default=None,
                         help="Use this customer id directly, skipping name lookup.")
     parser.add_argument("--start", required=True, help="Start date, inclusive, DDMMYYYY.")
@@ -307,6 +344,9 @@ def main(argv=None):
         config = load_config(args.config)
         client = InvoiceShelfClient(config)
         client.login()
+
+        if args.company:
+            client.company_id = resolve_company_id(client, args.company)
 
         if args.customer_id is not None:
             customer_id = args.customer_id
