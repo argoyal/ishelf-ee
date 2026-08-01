@@ -82,3 +82,18 @@ your own site.
 ## Develop / test
 
     python3 -m unittest discover -s tests -v
+
+## Releasing
+
+Publishing to PyPI is automated via GitHub Actions (`.github/workflows/publish-to-pypi.yaml`)
+using PyPI Trusted Publishing — no API token is stored. To cut a release:
+
+1. Bump `version` in `pyproject.toml` (must match the tag below).
+2. Commit, then tag and push:
+
+        git tag v0.1.0
+        git push origin main --tags
+
+The workflow builds and publishes the tagged version. A one-time Trusted Publisher
+must be configured on PyPI for the `ishelf-ee` project (owner `argoyal`, repo
+`ishelf-ee`, workflow `publish-to-pypi.yaml`).
