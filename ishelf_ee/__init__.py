@@ -536,7 +536,8 @@ def build_create_parser():
     p.add_argument("--date", required=True, help="Expense date, DDMMYYYY.")
     p.add_argument("--category", required=True, help="Expense category name.")
     p.add_argument("--notes", "--vendor", dest="notes", default="")
-    p.add_argument("--customer", default=None, help="Optional customer name.")
+    p.add_argument("--client", "--customer", dest="client", default=None,
+                   help="Client/customer name to attribute the expense to (optional).")
     p.add_argument("--exchange-rate", dest="exchange_rate", default=None,
                    help="Required only if the currency differs from the company default.")
     p.add_argument("--receipt", default=None, help="Path to a receipt file to attach.")
@@ -556,7 +557,7 @@ def run_create_cli(argv=None):
         client.company_id = resolve_company_id(client, args.company)
         currency_id = resolve_currency_id(client, args.currency)
         category_id = resolve_category_id(client, args.category)
-        customer_id = resolve_customer_id(client, args.customer) if args.customer else None
+        customer_id = resolve_customer_id(client, args.client) if args.client else None
         body = build_expense_body(
             expense_date=date, amount_minor=amount_minor, category_id=category_id,
             currency_id=currency_id, notes=args.notes, customer_id=customer_id,
