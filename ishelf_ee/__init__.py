@@ -2,6 +2,7 @@
 import argparse
 import csv
 import datetime
+import decimal
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import typing
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 
 CSV_COLUMNS = ["expense_number", "expense_date", "amount", "currency", "notes", "receipt_file"]
@@ -253,6 +255,39 @@ class InvoiceShelfClient:
     def download_receipt(self, expense_id):
         return self._request("GET", "/expenses/%s/show/receipt" % expense_id, raw=True)
 
+    def list_categories(self):
+        return _as_list(self._request("GET", "/categories", query={"limit": "all"}))
+
+    def list_currencies(self):
+        return _as_list(self._request("GET", "/currencies"))
+
+    def create_expense(self, body, receipt=None):
+        if receipt is None:
+            return self._request("POST", "/expenses", body=body)
+        filename, content, ctype = receipt
+        data, content_type = encode_multipart(
+            {k: v for k, v in body.items()},
+            file_field=("attachment_receipt", filename, content, ctype))
+        return self._request_multipart("POST", "/expenses", data, content_type)
+
+    def _request_multipart(self, method, path, data, content_type):
+        url = self.base + path
+        headers = {"Accept": "application/json", "User-Agent": self.user_agent,
+                   "Content-Type": content_type, "company": str(self.company_id)}
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            detail = ""
+            try:
+                detail = err.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            raise ApiError("HTTP %s for %s: %s" % (err.code, url, detail), status=err.code)
+
 
 def resolve_customer_id(client, name):
     customers = client.find_customers(name)
@@ -290,6 +325,83 @@ def resolve_company_id(client, name):
     raise LookupError(
         "Multiple companies match %r. Use an exact --company name or set "
         "INVOICESHELF_COMPANY_ID to one of:\n%s" % (name, listing))
+
+
+def amount_to_minor(amount_str, precision=2):
+    try:
+        d = decimal.Decimal(str(amount_str))
+    except decimal.InvalidOperation:
+        raise ValueError("amount must be a decimal number, got %r" % (amount_str,))
+    scaled = d.scaleb(int(precision)).quantize(decimal.Decimal(1), rounding=decimal.ROUND_HALF_UP)
+    return int(scaled)
+
+
+def build_expense_body(*, expense_date, amount_minor, category_id, currency_id, notes,
+                       customer_id=None, exchange_rate=None):
+    body = {
+        "expense_date": expense_date,
+        "amount": int(amount_minor),
+        "expense_category_id": category_id,
+        "currency_id": currency_id,
+        "notes": notes or "",
+    }
+    if customer_id is not None:
+        body["customer_id"] = customer_id
+    if exchange_rate is not None:
+        body["exchange_rate"] = exchange_rate
+    return body
+
+
+def encode_multipart(fields, file_field=None):
+    boundary = "----ee" + uuid.uuid4().hex
+    b = boundary.encode()
+    parts = []
+    for name, value in (fields or {}).items():
+        parts.append(b"--" + b + b"\r\n")
+        parts.append(('Content-Disposition: form-data; name="%s"\r\n\r\n' % name).encode())
+        parts.append(str(value).encode("utf-8") + b"\r\n")
+    if file_field is not None:
+        name, filename, content, ctype = file_field
+        parts.append(b"--" + b + b"\r\n")
+        parts.append(('Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (name, filename)).encode())
+        parts.append(("Content-Type: %s\r\n\r\n" % ctype).encode())
+        parts.append(content + b"\r\n")
+    parts.append(b"--" + b + b"--\r\n")
+    return b"".join(parts), "multipart/form-data; boundary=" + boundary
+
+
+def _as_list(resp):
+    return resp if isinstance(resp, list) else (resp or {}).get("data", [])
+
+
+def _resolve_by_name(items, name, kind, key="name"):
+    lname = (name or "").lower()
+    exact = [i for i in items if (i.get(key) or "").lower() == lname]
+    if len(exact) == 1:
+        return int(exact[0]["id"])
+    matches = exact or [i for i in items if lname in (i.get(key) or "").lower()]
+    if len(matches) == 1:
+        return int(matches[0]["id"])
+    listing = "\n".join("  %s — %s" % (i.get("id"), i.get(key)) for i in (matches or items)) or "  (none)"
+    raise LookupError("Ambiguous or absent %s %r. Options:\n%s" % (kind, name, listing))
+
+
+def resolve_category_id(client, name):
+    return _resolve_by_name(client.list_categories(), name, "category")
+
+
+def resolve_currency_id(client, code):
+    return _resolve_by_name(client.list_currencies(), code, "currency", key="code")
+
+
+SUBCOMMANDS = ("export", "create")
+
+
+def split_subcommand(argv):
+    argv = list(argv or [])
+    if argv and argv[0] in SUBCOMMANDS:
+        return argv[0], argv[1:]
+    return "export", argv
 
 
 ExportSummary = typing.NamedTuple("ExportSummary", [
@@ -373,7 +485,7 @@ def build_arg_parser():
     return parser
 
 
-def main(argv=None):
+def run_export_cli(argv=None):
     args = build_arg_parser().parse_args(argv)
     try:
         if not args.client and args.customer_id is None:
@@ -414,6 +526,67 @@ def main(argv=None):
     for number, msg in summary.receipt_failures:
         print("  ! receipt failed for %s: %s" % (number, msg), file=sys.stderr)
     return 0
+
+
+def build_create_parser():
+    p = argparse.ArgumentParser(prog="ee create", description="Create one expense in InvoiceShelf.")
+    p.add_argument("--company", required=True)
+    p.add_argument("--amount", required=True)
+    p.add_argument("--currency", required=True, help="Currency code, e.g. USD.")
+    p.add_argument("--date", required=True, help="Expense date, DDMMYYYY.")
+    p.add_argument("--category", required=True, help="Expense category name.")
+    p.add_argument("--notes", "--vendor", dest="notes", default="")
+    p.add_argument("--customer", default=None, help="Optional customer name.")
+    p.add_argument("--exchange-rate", dest="exchange_rate", default=None,
+                   help="Required only if the currency differs from the company default.")
+    p.add_argument("--receipt", default=None, help="Path to a receipt file to attach.")
+    p.add_argument("--config", default=None)
+    p.add_argument("--dry-run", action="store_true")
+    return p
+
+
+def run_create_cli(argv=None):
+    args = build_create_parser().parse_args(argv)
+    try:
+        date = to_api_date(parse_ddmmyyyy(args.date))
+        amount_minor = amount_to_minor(args.amount, 2)
+        config = load_config(find_config_file(args.config))
+        client = InvoiceShelfClient(config)
+        client.login()
+        client.company_id = resolve_company_id(client, args.company)
+        currency_id = resolve_currency_id(client, args.currency)
+        category_id = resolve_category_id(client, args.category)
+        customer_id = resolve_customer_id(client, args.customer) if args.customer else None
+        body = build_expense_body(
+            expense_date=date, amount_minor=amount_minor, category_id=category_id,
+            currency_id=currency_id, notes=args.notes, customer_id=customer_id,
+            exchange_rate=args.exchange_rate)
+        if args.dry_run:
+            print("DRY RUN — POST /expenses")
+            print(json.dumps(body, indent=2, sort_keys=True))
+            if args.receipt:
+                print("receipt: %s (multipart field 'attachment_receipt')" % args.receipt)
+            return 0
+        receipt = None
+        if args.receipt:
+            with open(args.receipt, "rb") as f:
+                receipt = (os.path.basename(args.receipt), f.read(), "application/octet-stream")
+        out = client.create_expense(body, receipt=receipt)
+        exp = out.get("data") or out
+        print("Created expense id: %s" % exp.get("id"))
+        return 0
+    except (ValueError, LookupError, ApiError, OSError) as err:
+        print("Error: %s" % err, file=sys.stderr)
+        return 1
+
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    sub, rest = split_subcommand(argv)
+    if sub == "create":
+        return run_create_cli(rest)
+    return run_export_cli(rest)
 
 
 if __name__ == "__main__":
