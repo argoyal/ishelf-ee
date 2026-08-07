@@ -261,6 +261,12 @@ class InvoiceShelfClient:
     def list_currencies(self):
         return _as_list(self._request("GET", "/currencies"))
 
+    def count_expenses_on_date(self, api_date):
+        """Company-scoped count of expenses whose expense_date is api_date (YYYY-MM-DD)."""
+        resp = self._request("GET", "/expenses",
+                             query={"from_date": api_date, "to_date": api_date, "limit": "all"})
+        return len(_as_list(resp))
+
     def create_expense(self, body, receipt=None):
         if receipt is None:
             return self._request("POST", "/expenses", body=body)
@@ -337,7 +343,7 @@ def amount_to_minor(amount_str, precision=2):
 
 
 def build_expense_body(*, expense_date, amount_minor, category_id, currency_id, notes,
-                       customer_id=None, exchange_rate=None):
+                       customer_id=None, exchange_rate=None, expense_number=None):
     body = {
         "expense_date": expense_date,
         "amount": int(amount_minor),
@@ -349,7 +355,14 @@ def build_expense_body(*, expense_date, amount_minor, category_id, currency_id, 
         body["customer_id"] = customer_id
     if exchange_rate is not None:
         body["exchange_rate"] = exchange_rate
+    if expense_number:
+        body["expense_number"] = expense_number
     return body
+
+
+def next_expense_number(date_ddmmyyyy, existing_count):
+    """Auto number: <DDMMYYYY><NN>, NN = existing_count + 1 (2-digit, e.g. 0708202601)."""
+    return "%s%02d" % (date_ddmmyyyy, int(existing_count) + 1)
 
 
 def encode_multipart(fields, file_field=None):
@@ -538,6 +551,9 @@ def build_create_parser():
     p.add_argument("--notes", "--vendor", dest="notes", default="")
     p.add_argument("--client", "--customer", dest="client", default=None,
                    help="Client/customer name to attribute the expense to (optional).")
+    p.add_argument("--expense-number", dest="expense_number", default=None,
+                   help="Expense number. If omitted, auto-generated as DDMMYYYY+NN "
+                        "(NN = count of expenses on that date + 1, e.g. 0708202601).")
     p.add_argument("--exchange-rate", dest="exchange_rate", default=None,
                    help="Required only if the currency differs from the company default.")
     p.add_argument("--receipt", default=None, help="Path to a receipt file to attach.")
@@ -558,10 +574,11 @@ def run_create_cli(argv=None):
         currency_id = resolve_currency_id(client, args.currency)
         category_id = resolve_category_id(client, args.category)
         customer_id = resolve_customer_id(client, args.client) if args.client else None
+        number = args.expense_number or next_expense_number(args.date, client.count_expenses_on_date(date))
         body = build_expense_body(
             expense_date=date, amount_minor=amount_minor, category_id=category_id,
             currency_id=currency_id, notes=args.notes, customer_id=customer_id,
-            exchange_rate=args.exchange_rate)
+            exchange_rate=args.exchange_rate, expense_number=number)
         if args.dry_run:
             print("DRY RUN — POST /expenses")
             print(json.dumps(body, indent=2, sort_keys=True))
