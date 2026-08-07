@@ -67,6 +67,24 @@ the export; the name is resolved to its id (case-insensitive, exact match prefer
 `--company` overrides `INVOICESHELF_COMPANY_ID`. On an ambiguous or unknown name, the
 tool lists the available companies as `id — name` so you can pick.
 
+## Create an expense
+
+`ee create` logs a single expense to InvoiceShelf, optionally attaching a receipt. The
+export commands are unchanged — `ee …` with no subcommand still exports, and `ee export …`
+is the explicit form.
+
+    ee create --company "AsterHQ" --amount 12.34 --currency USD --date 07082026 \
+              --category "Software" --notes "Anthropic" --receipt ./receipt.png
+
+Flags: `--company` (required, resolved by name), `--amount` (decimal), `--currency` (code,
+e.g. `USD`), `--date` (`DDMMYYYY`), `--category` (required, resolved by name),
+`--notes`/`--vendor`, `--customer` (optional), `--receipt PATH` (uploaded as
+`attachment_receipt`), `--exchange-rate` (only when the currency differs from the company
+default), and `--dry-run`.
+
+`--dry-run` prints the exact `POST /expenses` body without writing anything. Amounts are
+sent in minor units; a receipt is uploaded via `multipart/form-data`.
+
 ## Troubleshooting
 
 **Cloudflare "Error 1010: Access denied" / HTTP 403 on login.** The instance is
