@@ -15,6 +15,7 @@ import uuid
 import zipfile
 
 CSV_COLUMNS = ["expense_number", "expense_date", "amount", "currency", "notes", "receipt_file"]
+CSV_COLUMNS_ALL = CSV_COLUMNS + ["expense_id", "company", "client", "category", "exchange_rate", "created_at"]
 
 Config = typing.NamedTuple("Config", [
     ("url", str), ("email", str), ("password", str), ("company_id", str),
@@ -140,12 +141,12 @@ class ZipNamer:
             i += 1
 
 
-def expense_to_row(expense, receipt_file):
+def expense_to_row(expense, receipt_file, *, all_fields=False, category_map=None, company_name=None):
     currency = expense.get("currency") or {}
     precision = currency.get("precision", 2)
     if precision in (None, ""):
         precision = 2
-    return {
+    row = {
         "expense_number": expense.get("expense_number") or "",
         "expense_date": expense.get("expense_date") or "",
         "amount": scale_amount(expense.get("amount") or 0, precision),
@@ -153,11 +154,32 @@ def expense_to_row(expense, receipt_file):
         "notes": expense.get("notes") or "",
         "receipt_file": receipt_file or "",
     }
+    if not all_fields:
+        return row
+    category_map = category_map or {}
+    # Client: prefer a nested customer object, else the raw customer_id.
+    customer = expense.get("customer") or {}
+    client_name = customer.get("name") or (
+        str(expense["customer_id"]) if expense.get("customer_id") is not None else "")
+    # Category: prefer a nested category object, else resolve the id via the map.
+    cat = expense.get("category") or expense.get("expense_category")
+    cat_name = cat.get("name") if isinstance(cat, dict) else ""
+    if not cat_name:
+        cat_name = category_map.get(expense.get("expense_category_id"), "")
+    row.update({
+        "expense_id": expense.get("id") or "",
+        "company": company_name or "",
+        "client": client_name,
+        "category": cat_name,
+        "exchange_rate": expense.get("exchange_rate") or "",
+        "created_at": expense.get("created_at") or "",
+    })
+    return row
 
 
-def write_csv(rows, path):
+def write_csv(rows, path, columns=CSV_COLUMNS):
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
@@ -243,13 +265,15 @@ class InvoiceShelfClient:
         resp = self._request("GET", "/customers", query={"search": name, "limit": "all"})
         return resp.get("data", [])
 
-    def list_expenses(self, customer_id, from_date, to_date):
-        resp = self._request("GET", "/expenses", query={
-            "customer_id": customer_id,
-            "from_date": from_date,
-            "to_date": to_date,
-            "limit": "all",
-        })
+    def list_expenses(self, customer_id=None, from_date=None, to_date=None):
+        query = {"limit": "all"}
+        if customer_id is not None:
+            query["customer_id"] = customer_id
+        if from_date:
+            query["from_date"] = from_date
+        if to_date:
+            query["to_date"] = to_date
+        resp = self._request("GET", "/expenses", query=query)
         return resp.get("data", [])
 
     def download_receipt(self, expense_id):
@@ -423,21 +447,14 @@ ExportSummary = typing.NamedTuple("ExportSummary", [
 ])
 
 
-def run_export(client, *, customer_id, client_label, start_date, end_date, out_dir, dry_run=False):
-    expenses = client.list_expenses(
-        customer_id, to_api_date(start_date), to_api_date(end_date))
-    stem = "%s_%s-%s" % (
-        sanitize_filename(client_label),
-        to_filename_date(start_date), to_filename_date(end_date))
-    csv_path = os.path.join(out_dir, stem + ".csv")
-    zip_path = os.path.join(out_dir, stem + "_receipts.zip")
+def _category_map(client):
+    return {c.get("id"): c.get("name") for c in client.list_categories()}
 
-    namer = ZipNamer()
-    rows = []
-    stored = []  # (name, bytes)
-    failures = []
+
+def _collect_rows(client, expenses, namer, *, all_fields=False, category_map=None,
+                  company_name=None, dry_run=False):
+    rows, stored, failures = [], [], []
     receipts_available = 0
-
     for expense in expenses:
         meta = expense.get("attachment_receipt_meta")
         receipt_file = ""
@@ -455,13 +472,19 @@ def run_export(client, *, customer_id, client_label, start_date, end_date, out_d
                     receipt_file = entry
                 except Exception as err:  # noqa: BLE001 - report, don't abort
                     failures.append((expense.get("expense_number") or expense.get("id"), str(err)))
-        rows.append(expense_to_row(expense, receipt_file))
+        rows.append(expense_to_row(expense, receipt_file, all_fields=all_fields,
+                                   category_map=category_map, company_name=company_name))
+    return rows, stored, failures, receipts_available
 
+
+def _write_export(rows, stored, failures, receipts_available, expense_count,
+                  out_dir, stem, columns, dry_run):
+    csv_path = os.path.join(out_dir, stem + ".csv")
+    zip_path = os.path.join(out_dir, stem + "_receipts.zip")
     downloaded = receipts_available if dry_run else len(stored)
-
     if not dry_run:
         os.makedirs(out_dir, exist_ok=True)
-        write_csv(rows, csv_path)
+        write_csv(rows, csv_path, columns=columns)
         if stored:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for name, data in stored:
@@ -470,10 +493,60 @@ def run_export(client, *, customer_id, client_label, start_date, end_date, out_d
             zip_path = None
     else:
         zip_path = zip_path if receipts_available else None
-
     return ExportSummary(
-        expense_count=len(expenses), receipts_downloaded=downloaded,
+        expense_count=expense_count, receipts_downloaded=downloaded,
         receipt_failures=failures, csv_path=csv_path, zip_path=zip_path)
+
+
+def run_export(client, *, customer_id, client_label, start_date, end_date, out_dir,
+               dry_run=False, all_fields=False):
+    expenses = client.list_expenses(
+        customer_id, to_api_date(start_date), to_api_date(end_date))
+    stem = "%s_%s-%s" % (
+        sanitize_filename(client_label),
+        to_filename_date(start_date), to_filename_date(end_date))
+    category_map = _category_map(client) if all_fields else None
+    columns = CSV_COLUMNS_ALL if all_fields else CSV_COLUMNS
+    namer = ZipNamer()
+    rows, stored, failures, receipts_available = _collect_rows(
+        client, expenses, namer, all_fields=all_fields, category_map=category_map,
+        company_name=None, dry_run=dry_run)
+    return _write_export(rows, stored, failures, receipts_available, len(expenses),
+                         out_dir, stem, columns, dry_run)
+
+
+def run_corpus_export(client, *, out_dir, all_fields=True, start_date=None, end_date=None,
+                      dry_run=False, customer_id=None, all_companies=False):
+    companies = client.list_companies() if all_companies else [None]
+    frm = to_api_date(start_date) if start_date else None
+    to = to_api_date(end_date) if end_date else None
+    namer = ZipNamer()  # shared across companies → receipt names de-dup globally
+    all_rows, all_stored, all_failures = [], [], []
+    total = 0
+    receipts_available = 0
+    for company in companies:
+        company_name = None
+        if company is not None:
+            client.company_id = company.get("id")
+            company_name = company.get("name")
+        category_map = _category_map(client) if all_fields else None
+        expenses = client.list_expenses(customer_id=customer_id, from_date=frm, to_date=to)
+        total += len(expenses)
+        rows, stored, failures, avail = _collect_rows(
+            client, expenses, namer, all_fields=all_fields, category_map=category_map,
+            company_name=company_name, dry_run=dry_run)
+        all_rows += rows
+        all_stored += stored
+        all_failures += failures
+        receipts_available += avail
+    if start_date and end_date:
+        span = "%s-%s" % (to_filename_date(start_date), to_filename_date(end_date))
+    else:
+        span = "all-time"
+    stem = "all-expenses_%s" % span
+    columns = CSV_COLUMNS_ALL if all_fields else CSV_COLUMNS
+    return _write_export(all_rows, all_stored, all_failures, receipts_available,
+                         total, out_dir, stem, columns, dry_run)
 
 
 def build_arg_parser():
@@ -485,8 +558,13 @@ def build_arg_parser():
                              "Overrides INVOICESHELF_COMPANY_ID from config.")
     parser.add_argument("--customer-id", type=int, default=None,
                         help="Use this customer id directly, skipping name lookup.")
-    parser.add_argument("--start", required=True, help="Start date, inclusive, DDMMYYYY.")
-    parser.add_argument("--end", required=True, help="End date, inclusive, DDMMYYYY.")
+    parser.add_argument("--start", default=None,
+                        help="Start date, inclusive, DDMMYYYY. Required unless --company all / --client all.")
+    parser.add_argument("--end", default=None,
+                        help="End date, inclusive, DDMMYYYY. Required unless --company all / --client all.")
+    parser.add_argument("--export-all-fields", action="store_true",
+                        help="Export the full field set (company, client, category, exchange_rate, "
+                             "expense_id, created_at) instead of the default six columns.")
     parser.add_argument("--out", default="exports", help="Output directory (default: exports).")
     parser.add_argument("--config", default=None,
                         help="Path to config env file. If omitted, searches "
@@ -501,28 +579,55 @@ def build_arg_parser():
 def run_export_cli(argv=None):
     args = build_arg_parser().parse_args(argv)
     try:
-        if not args.client and args.customer_id is None:
+        company_all = (args.company or "").lower() == "all"
+        client_all = (args.client or "").lower() == "all"
+        corpus = company_all or client_all
+
+        start = end = None
+        if args.start and args.end:
+            start = parse_ddmmyyyy(args.start)
+            end = parse_ddmmyyyy(args.end)
+            validate_range(start, end)
+        elif not corpus:
+            raise ValueError("Provide --start and --end (DDMMYYYY), "
+                             "or use --company all / --client all for the full corpus.")
+
+        if company_all and (
+                (args.client and not client_all) or args.customer_id is not None):
+            raise ValueError(
+                "--company all cannot be combined with a specific --client/--customer-id; "
+                "use --client all (or omit it) for the full corpus, or name a single --company.")
+
+        if not corpus and not args.client and args.customer_id is None:
             raise ValueError("Provide --client NAME or --customer-id ID.")
-        start = parse_ddmmyyyy(args.start)
-        end = parse_ddmmyyyy(args.end)
-        validate_range(start, end)
 
         config = load_config(find_config_file(args.config))
         client = InvoiceShelfClient(config)
         client.login()
 
-        if args.company:
-            client.company_id = resolve_company_id(client, args.company)
-
-        if args.customer_id is not None:
-            customer_id = args.customer_id
+        if corpus:
+            if not company_all and args.company:
+                client.company_id = resolve_company_id(client, args.company)
+            customer_id = None
+            if not client_all:
+                customer_id = (args.customer_id if args.customer_id is not None
+                               else resolve_customer_id(client, args.client))
+            summary = run_corpus_export(
+                client, out_dir=args.out, all_fields=args.export_all_fields,
+                start_date=start, end_date=end, dry_run=args.dry_run,
+                customer_id=customer_id, all_companies=company_all)
         else:
-            customer_id = resolve_customer_id(client, args.client)
-
-        label = args.client or ("customer-%s" % customer_id)
-        summary = run_export(
-            client, customer_id=customer_id, client_label=label,
-            start_date=start, end_date=end, out_dir=args.out, dry_run=args.dry_run)
+            if args.company:
+                client.company_id = resolve_company_id(client, args.company)
+            if args.customer_id is not None:
+                customer_id = args.customer_id
+            else:
+                customer_id = resolve_customer_id(client, args.client)
+            label = args.client or ("customer-%s" % customer_id)
+            summary = run_export(
+                client, customer_id=customer_id, client_label=label,
+                start_date=start, end_date=end, out_dir=args.out,
+                dry_run=args.dry_run, all_fields=args.export_all_fields)
     except (ValueError, LookupError, ApiError) as err:
         print("Error: %s" % err, file=sys.stderr)
         return 1

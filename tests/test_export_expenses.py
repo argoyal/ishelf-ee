@@ -149,6 +149,20 @@ class RowCsvTests(unittest.TestCase):
             "currency": {"code": "USD", "precision": 2},
         }
 
+    def _expense_full(self):
+        return {
+            "id": 42,
+            "expense_number": "EXP-000001",
+            "expense_date": "2025-04-15",
+            "amount": 123456,
+            "notes": "Taxi, airport",
+            "currency": {"code": "USD", "precision": 2},
+            "expense_category_id": 8,
+            "customer": {"id": 5, "name": "Ascendra Ventures"},
+            "exchange_rate": "1",
+            "created_at": "2025-04-15T10:00:00Z",
+        }
+
     def test_expense_to_row(self):
         row = ee.expense_to_row(self._expense(), "EXP-000001__taxi.pdf")
         self.assertEqual(row, {
@@ -180,6 +194,49 @@ class RowCsvTests(unittest.TestCase):
         self.assertEqual(list(got[0].keys()), ee.CSV_COLUMNS)
         self.assertEqual(got[0]["amount"], "1234.56")
         self.assertEqual(got[0]["notes"], "Taxi, airport")
+
+    def test_default_row_unchanged_when_not_all_fields(self):
+        row = ee.expense_to_row(self._expense(), "r.pdf")
+        self.assertEqual(list(row.keys()), ee.CSV_COLUMNS)
+
+    def test_all_fields_row_resolves_names(self):
+        row = ee.expense_to_row(
+            self._expense_full(), "EXP-000001__taxi.pdf",
+            all_fields=True, category_map={8: "Food"}, company_name="Arpit Goyal")
+        self.assertEqual(list(row.keys()), ee.CSV_COLUMNS_ALL)
+        self.assertEqual(row["expense_id"], 42)
+        self.assertEqual(row["company"], "Arpit Goyal")
+        self.assertEqual(row["client"], "Ascendra Ventures")
+        self.assertEqual(row["category"], "Food")
+        self.assertEqual(row["exchange_rate"], "1")
+        self.assertEqual(row["created_at"], "2025-04-15T10:00:00Z")
+
+    def test_all_fields_category_falls_back_to_nested_object(self):
+        exp = self._expense_full()
+        del exp["expense_category_id"]
+        exp["category"] = {"id": 8, "name": "Fuel"}
+        row = ee.expense_to_row(exp, "", all_fields=True, category_map={}, company_name="X")
+        self.assertEqual(row["category"], "Fuel")
+
+    def test_all_fields_client_falls_back_to_customer_id(self):
+        exp = self._expense_full()
+        del exp["customer"]
+        exp["customer_id"] = 77
+        row = ee.expense_to_row(exp, "", all_fields=True, category_map={8: "Food"}, company_name="X")
+        self.assertEqual(row["client"], "77")
+
+    def test_write_csv_all_columns(self):
+        rows = [ee.expense_to_row(self._expense_full(), "r.pdf",
+                                  all_fields=True, category_map={8: "Food"}, company_name="Arpit Goyal")]
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        ee.write_csv(rows, path, columns=ee.CSV_COLUMNS_ALL)
+        with open(path, newline="", encoding="utf-8") as f:
+            got = list(_csv.DictReader(f))
+        self.assertEqual(list(got[0].keys()), ee.CSV_COLUMNS_ALL)
+        self.assertEqual(got[0]["category"], "Food")
+        self.assertEqual(got[0]["company"], "Arpit Goyal")
 
 
 class ClientTests(unittest.TestCase):
@@ -226,6 +283,23 @@ class ClientTests(unittest.TestCase):
         self.assertIn("limit=all", captured["url"])
         self.assertEqual(captured["headers"]["company"], "1")
         self.assertEqual(captured["headers"]["authorization"], "Bearer tok123")
+
+    def test_list_expenses_omits_customer_when_none(self):
+        client = self._client()
+        client.token = "tok123"
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            return _fake_json_resp({"data": [{"id": 1}]})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            data = client.list_expenses()  # no filters → whole company
+
+        self.assertEqual(data, [{"id": 1}])
+        self.assertNotIn("customer_id", captured["url"])
+        self.assertNotIn("from_date", captured["url"])
+        self.assertIn("limit=all", captured["url"])
 
     def test_download_receipt_returns_bytes(self):
         client = self._client()
@@ -402,13 +476,17 @@ class CompanyResolveTests(unittest.TestCase):
 
 
 class _ExportClient:
-    def __init__(self, expenses, receipts=None, fail_ids=()):
+    def __init__(self, expenses, receipts=None, fail_ids=(), categories=None):
         self._expenses = expenses
         self._receipts = receipts or {}
         self._fail_ids = set(fail_ids)
+        self._categories = categories or [{"id": 8, "name": "Food"}]
 
-    def list_expenses(self, customer_id, from_date, to_date):
+    def list_expenses(self, customer_id=None, from_date=None, to_date=None):
         return self._expenses
+
+    def list_categories(self):
+        return self._categories
 
     def download_receipt(self, expense_id):
         if expense_id in self._fail_ids:
@@ -497,6 +575,111 @@ class RunExportTests(unittest.TestCase):
         self.assertEqual(header, ",".join(ee.CSV_COLUMNS))
 
 
+class RunExportAllFieldsTests(unittest.TestCase):
+    def _out(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        return d
+
+    def _exp_full(self, id, number):
+        return {"id": id, "expense_number": number, "expense_date": "2025-04-10",
+                "amount": 1000, "notes": "n", "currency": {"code": "USD", "precision": 2},
+                "expense_category_id": 8, "customer": {"id": 5, "name": "Ascendra"},
+                "exchange_rate": "1", "created_at": "2025-04-10T00:00:00Z",
+                "attachment_receipt_meta": None}
+
+    def test_all_fields_writes_wide_csv(self):
+        client = _ExportClient([self._exp_full(1, "EXP-1")])
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Ascendra",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 6, 30),
+            out_dir=self._out(), all_fields=True)
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        self.assertEqual(list(rows[0].keys()), ee.CSV_COLUMNS_ALL)
+        self.assertEqual(rows[0]["category"], "Food")
+        self.assertEqual(rows[0]["client"], "Ascendra")
+
+    def test_default_still_six_columns(self):
+        client = _ExportClient([self._exp_full(1, "EXP-1")])
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Ascendra",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 6, 30),
+            out_dir=self._out())  # all_fields defaults False
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            header = f.readline().strip()
+        self.assertEqual(header, ",".join(ee.CSV_COLUMNS))
+
+
+class _CorpusClient:
+    """Stub for corpus export: multiple companies, per-company expenses."""
+    def __init__(self, companies, expenses_by_company, categories=None):
+        self.companies = companies
+        self.expenses_by_company = expenses_by_company
+        self._categories = categories or [{"id": 8, "name": "Food"}]
+        self.company_id = "1"
+        self.calls = []  # (company_id, customer_id) per list_expenses
+
+    def list_companies(self):
+        return self.companies
+
+    def list_categories(self):
+        return self._categories
+
+    def list_expenses(self, customer_id=None, from_date=None, to_date=None):
+        self.calls.append((self.company_id, customer_id))
+        return self.expenses_by_company.get(self.company_id, [])
+
+    def download_receipt(self, expense_id):
+        return b"BYTES"
+
+
+def _cexp(id, number, company_hint):
+    return {"id": id, "expense_number": number, "expense_date": "2025-04-10",
+            "amount": 1000, "notes": company_hint, "currency": {"code": "INR", "precision": 2},
+            "expense_category_id": 8, "customer": {"id": 5, "name": "Cust-%s" % company_hint},
+            "exchange_rate": "1", "created_at": "2025-04-10T00:00:00Z",
+            "attachment_receipt_meta": None}
+
+
+class RunCorpusExportTests(unittest.TestCase):
+    def _out(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        return d
+
+    def test_all_companies_combined_csv(self):
+        client = _CorpusClient(
+            companies=[{"id": 2, "name": "Arpit Goyal"}, {"id": 3, "name": "PeopleEquation"}],
+            expenses_by_company={2: [_cexp(1, "A-1", "A")], 3: [_cexp(2, "B-1", "B")]})
+        summary = ee.run_corpus_export(
+            client, out_dir=self._out(), all_fields=True, all_companies=True)
+        self.assertEqual(summary.expense_count, 2)
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        self.assertEqual(list(rows[0].keys()), ee.CSV_COLUMNS_ALL)
+        companies = sorted(r["company"] for r in rows)
+        self.assertEqual(companies, ["Arpit Goyal", "PeopleEquation"])
+        self.assertTrue(os.path.basename(summary.csv_path).startswith("all-expenses_all-time"))
+
+    def test_all_clients_lists_without_customer_id(self):
+        client = _CorpusClient(
+            companies=[{"id": 2, "name": "Arpit Goyal"}],
+            expenses_by_company={2: [_cexp(1, "A-1", "A")]})
+        ee.run_corpus_export(client, out_dir=self._out(), all_fields=True, all_companies=True)
+        # every list_expenses call for the corpus must pass customer_id=None
+        self.assertTrue(all(cust is None for (_co, cust) in client.calls))
+        self.assertIn(2, [co for (co, _c) in client.calls])  # company header switched to 2
+
+    def test_dates_appear_in_stem_when_given(self):
+        client = _CorpusClient(companies=[{"id": 2, "name": "X"}],
+                               expenses_by_company={2: []})
+        summary = ee.run_corpus_export(
+            client, out_dir=self._out(), all_fields=True, all_companies=True,
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 6, 30))
+        self.assertIn("01042025-30062025", os.path.basename(summary.csv_path))
+
+
 class CliTests(unittest.TestCase):
     def test_parser_reads_args(self):
         parser = ee.build_arg_parser()
@@ -569,3 +752,80 @@ class CliTests(unittest.TestCase):
             rc = ee.main(["--customer-id", "7", "--start", "01042025",
                           "--end", "30062025", "--out", out])
         self.assertEqual(rc, 0)
+
+    def test_parser_accepts_export_all_fields(self):
+        args = ee.build_arg_parser().parse_args(
+            ["--client", "Acme", "--start", "01042025", "--end", "30062025", "--export-all-fields"])
+        self.assertTrue(args.export_all_fields)
+
+    def test_corpus_mode_routes_to_run_corpus_export(self):
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out)
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _CorpusClient(companies=[{"id": 2, "name": "Arpit Goyal"}],
+                             expenses_by_company={2: [_cexp(1, "A-1", "A")]})
+        fake.login = lambda: "tok"
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "all", "--client", "all",
+                          "--export-all-fields", "--out", out])
+        self.assertEqual(rc, 0)
+        files = os.listdir(out)
+        self.assertTrue(any(n.startswith("all-expenses_all-time") and n.endswith(".csv")
+                            for n in files), files)
+
+    def test_non_corpus_requires_dates(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _ExportClient([])
+        fake.login = lambda: "tok"
+        fake.find_customers = lambda name: [{"id": 5, "name": "Acme"}]
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--client", "Acme"])  # no dates, not corpus
+        self.assertEqual(rc, 1)
+
+    def _no_login_client(self):
+        def _boom():
+            raise AssertionError("login must not be called")
+        fake = _ExportClient([])
+        fake.login = _boom
+        return fake
+
+    def test_company_all_with_named_client_rejected_before_login(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = self._no_login_client()
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "all", "--client", "Acme",
+                          "--start", "01042025", "--end", "30062025"])
+        self.assertEqual(rc, 1)
+
+    def test_company_all_with_customer_id_rejected_before_login(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = self._no_login_client()
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "all", "--customer-id", "7",
+                          "--start", "01042025", "--end", "30062025"])
+        self.assertEqual(rc, 1)
+
+    def test_company_all_client_all_still_works(self):
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out)
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _CorpusClient(companies=[{"id": 2, "name": "Arpit Goyal"}],
+                             expenses_by_company={2: [_cexp(1, "A-1", "A")]})
+        fake.login = lambda: "tok"
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "all", "--client", "all",
+                          "--export-all-fields", "--out", out])
+        self.assertEqual(rc, 0)
+
+    def test_non_corpus_missing_client_fails_before_login(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = self._no_login_client()
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--start", "01042025", "--end", "30062025"])  # no client, no customer-id
+        self.assertEqual(rc, 1)
