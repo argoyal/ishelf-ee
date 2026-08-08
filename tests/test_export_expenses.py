@@ -752,3 +752,34 @@ class CliTests(unittest.TestCase):
             rc = ee.main(["--customer-id", "7", "--start", "01042025",
                           "--end", "30062025", "--out", out])
         self.assertEqual(rc, 0)
+
+    def test_parser_accepts_export_all_fields(self):
+        args = ee.build_arg_parser().parse_args(
+            ["--client", "Acme", "--start", "01042025", "--end", "30062025", "--export-all-fields"])
+        self.assertTrue(args.export_all_fields)
+
+    def test_corpus_mode_routes_to_run_corpus_export(self):
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out)
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _CorpusClient(companies=[{"id": 2, "name": "Arpit Goyal"}],
+                             expenses_by_company={2: [_cexp(1, "A-1", "A")]})
+        fake.login = lambda: "tok"
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "all", "--client", "all",
+                          "--export-all-fields", "--out", out])
+        self.assertEqual(rc, 0)
+        files = os.listdir(out)
+        self.assertTrue(any(n.startswith("all-expenses_all-time") and n.endswith(".csv")
+                            for n in files), files)
+
+    def test_non_corpus_requires_dates(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _ExportClient([])
+        fake.login = lambda: "tok"
+        fake.find_customers = lambda name: [{"id": 5, "name": "Acme"}]
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--client", "Acme"])  # no dates, not corpus
+        self.assertEqual(rc, 1)

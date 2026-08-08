@@ -558,8 +558,13 @@ def build_arg_parser():
                              "Overrides INVOICESHELF_COMPANY_ID from config.")
     parser.add_argument("--customer-id", type=int, default=None,
                         help="Use this customer id directly, skipping name lookup.")
-    parser.add_argument("--start", required=True, help="Start date, inclusive, DDMMYYYY.")
-    parser.add_argument("--end", required=True, help="End date, inclusive, DDMMYYYY.")
+    parser.add_argument("--start", default=None,
+                        help="Start date, inclusive, DDMMYYYY. Required unless --company all / --client all.")
+    parser.add_argument("--end", default=None,
+                        help="End date, inclusive, DDMMYYYY. Required unless --company all / --client all.")
+    parser.add_argument("--export-all-fields", action="store_true",
+                        help="Export the full field set (company, client, category, exchange_rate, "
+                             "expense_id, created_at) instead of the default six columns.")
     parser.add_argument("--out", default="exports", help="Output directory (default: exports).")
     parser.add_argument("--config", default=None,
                         help="Path to config env file. If omitted, searches "
@@ -574,28 +579,48 @@ def build_arg_parser():
 def run_export_cli(argv=None):
     args = build_arg_parser().parse_args(argv)
     try:
-        if not args.client and args.customer_id is None:
-            raise ValueError("Provide --client NAME or --customer-id ID.")
-        start = parse_ddmmyyyy(args.start)
-        end = parse_ddmmyyyy(args.end)
-        validate_range(start, end)
+        company_all = (args.company or "").lower() == "all"
+        client_all = (args.client or "").lower() == "all"
+        corpus = company_all or client_all
+
+        start = end = None
+        if args.start and args.end:
+            start = parse_ddmmyyyy(args.start)
+            end = parse_ddmmyyyy(args.end)
+            validate_range(start, end)
+        elif not corpus:
+            raise ValueError("Provide --start and --end (DDMMYYYY), "
+                             "or use --company all / --client all for the full corpus.")
 
         config = load_config(find_config_file(args.config))
         client = InvoiceShelfClient(config)
         client.login()
 
-        if args.company:
-            client.company_id = resolve_company_id(client, args.company)
-
-        if args.customer_id is not None:
-            customer_id = args.customer_id
+        if corpus:
+            if not company_all and args.company:
+                client.company_id = resolve_company_id(client, args.company)
+            customer_id = None
+            if not client_all:
+                customer_id = (args.customer_id if args.customer_id is not None
+                               else resolve_customer_id(client, args.client))
+            summary = run_corpus_export(
+                client, out_dir=args.out, all_fields=args.export_all_fields,
+                start_date=start, end_date=end, dry_run=args.dry_run,
+                customer_id=customer_id, all_companies=company_all)
         else:
-            customer_id = resolve_customer_id(client, args.client)
-
-        label = args.client or ("customer-%s" % customer_id)
-        summary = run_export(
-            client, customer_id=customer_id, client_label=label,
-            start_date=start, end_date=end, out_dir=args.out, dry_run=args.dry_run)
+            if not args.client and args.customer_id is None:
+                raise ValueError("Provide --client NAME or --customer-id ID.")
+            if args.company:
+                client.company_id = resolve_company_id(client, args.company)
+            if args.customer_id is not None:
+                customer_id = args.customer_id
+            else:
+                customer_id = resolve_customer_id(client, args.client)
+            label = args.client or ("customer-%s" % customer_id)
+            summary = run_export(
+                client, customer_id=customer_id, client_label=label,
+                start_date=start, end_date=end, out_dir=args.out,
+                dry_run=args.dry_run, all_fields=args.export_all_fields)
     except (ValueError, LookupError, ApiError) as err:
         print("Error: %s" % err, file=sys.stderr)
         return 1
