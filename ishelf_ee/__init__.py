@@ -447,21 +447,14 @@ ExportSummary = typing.NamedTuple("ExportSummary", [
 ])
 
 
-def run_export(client, *, customer_id, client_label, start_date, end_date, out_dir, dry_run=False):
-    expenses = client.list_expenses(
-        customer_id, to_api_date(start_date), to_api_date(end_date))
-    stem = "%s_%s-%s" % (
-        sanitize_filename(client_label),
-        to_filename_date(start_date), to_filename_date(end_date))
-    csv_path = os.path.join(out_dir, stem + ".csv")
-    zip_path = os.path.join(out_dir, stem + "_receipts.zip")
+def _category_map(client):
+    return {c.get("id"): c.get("name") for c in client.list_categories()}
 
-    namer = ZipNamer()
-    rows = []
-    stored = []  # (name, bytes)
-    failures = []
+
+def _collect_rows(client, expenses, namer, *, all_fields=False, category_map=None,
+                  company_name=None, dry_run=False):
+    rows, stored, failures = [], [], []
     receipts_available = 0
-
     for expense in expenses:
         meta = expense.get("attachment_receipt_meta")
         receipt_file = ""
@@ -479,13 +472,19 @@ def run_export(client, *, customer_id, client_label, start_date, end_date, out_d
                     receipt_file = entry
                 except Exception as err:  # noqa: BLE001 - report, don't abort
                     failures.append((expense.get("expense_number") or expense.get("id"), str(err)))
-        rows.append(expense_to_row(expense, receipt_file))
+        rows.append(expense_to_row(expense, receipt_file, all_fields=all_fields,
+                                   category_map=category_map, company_name=company_name))
+    return rows, stored, failures, receipts_available
 
+
+def _write_export(rows, stored, failures, receipts_available, expense_count,
+                  out_dir, stem, columns, dry_run):
+    csv_path = os.path.join(out_dir, stem + ".csv")
+    zip_path = os.path.join(out_dir, stem + "_receipts.zip")
     downloaded = receipts_available if dry_run else len(stored)
-
     if not dry_run:
         os.makedirs(out_dir, exist_ok=True)
-        write_csv(rows, csv_path)
+        write_csv(rows, csv_path, columns=columns)
         if stored:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for name, data in stored:
@@ -494,10 +493,26 @@ def run_export(client, *, customer_id, client_label, start_date, end_date, out_d
             zip_path = None
     else:
         zip_path = zip_path if receipts_available else None
-
     return ExportSummary(
-        expense_count=len(expenses), receipts_downloaded=downloaded,
+        expense_count=expense_count, receipts_downloaded=downloaded,
         receipt_failures=failures, csv_path=csv_path, zip_path=zip_path)
+
+
+def run_export(client, *, customer_id, client_label, start_date, end_date, out_dir,
+               dry_run=False, all_fields=False):
+    expenses = client.list_expenses(
+        customer_id, to_api_date(start_date), to_api_date(end_date))
+    stem = "%s_%s-%s" % (
+        sanitize_filename(client_label),
+        to_filename_date(start_date), to_filename_date(end_date))
+    category_map = _category_map(client) if all_fields else None
+    columns = CSV_COLUMNS_ALL if all_fields else CSV_COLUMNS
+    namer = ZipNamer()
+    rows, stored, failures, receipts_available = _collect_rows(
+        client, expenses, namer, all_fields=all_fields, category_map=category_map,
+        company_name=None, dry_run=dry_run)
+    return _write_export(rows, stored, failures, receipts_available, len(expenses),
+                         out_dir, stem, columns, dry_run)
 
 
 def build_arg_parser():

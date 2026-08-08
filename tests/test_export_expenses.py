@@ -476,13 +476,17 @@ class CompanyResolveTests(unittest.TestCase):
 
 
 class _ExportClient:
-    def __init__(self, expenses, receipts=None, fail_ids=()):
+    def __init__(self, expenses, receipts=None, fail_ids=(), categories=None):
         self._expenses = expenses
         self._receipts = receipts or {}
         self._fail_ids = set(fail_ids)
+        self._categories = categories or [{"id": 8, "name": "Food"}]
 
-    def list_expenses(self, customer_id, from_date, to_date):
+    def list_expenses(self, customer_id=None, from_date=None, to_date=None):
         return self._expenses
+
+    def list_categories(self):
+        return self._categories
 
     def download_receipt(self, expense_id):
         if expense_id in self._fail_ids:
@@ -566,6 +570,42 @@ class RunExportTests(unittest.TestCase):
         with open(summary.csv_path, newline="", encoding="utf-8") as f:
             rows = list(_csv.DictReader(f))
         self.assertEqual(rows, [])  # header only, no data rows
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            header = f.readline().strip()
+        self.assertEqual(header, ",".join(ee.CSV_COLUMNS))
+
+
+class RunExportAllFieldsTests(unittest.TestCase):
+    def _out(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        return d
+
+    def _exp_full(self, id, number):
+        return {"id": id, "expense_number": number, "expense_date": "2025-04-10",
+                "amount": 1000, "notes": "n", "currency": {"code": "USD", "precision": 2},
+                "expense_category_id": 8, "customer": {"id": 5, "name": "Ascendra"},
+                "exchange_rate": "1", "created_at": "2025-04-10T00:00:00Z",
+                "attachment_receipt_meta": None}
+
+    def test_all_fields_writes_wide_csv(self):
+        client = _ExportClient([self._exp_full(1, "EXP-1")])
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Ascendra",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 6, 30),
+            out_dir=self._out(), all_fields=True)
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        self.assertEqual(list(rows[0].keys()), ee.CSV_COLUMNS_ALL)
+        self.assertEqual(rows[0]["category"], "Food")
+        self.assertEqual(rows[0]["client"], "Ascendra")
+
+    def test_default_still_six_columns(self):
+        client = _ExportClient([self._exp_full(1, "EXP-1")])
+        summary = ee.run_export(
+            client, customer_id=5, client_label="Ascendra",
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 6, 30),
+            out_dir=self._out())  # all_fields defaults False
         with open(summary.csv_path, newline="", encoding="utf-8") as f:
             header = f.readline().strip()
         self.assertEqual(header, ",".join(ee.CSV_COLUMNS))
