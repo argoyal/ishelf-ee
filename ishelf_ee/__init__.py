@@ -515,6 +515,40 @@ def run_export(client, *, customer_id, client_label, start_date, end_date, out_d
                          out_dir, stem, columns, dry_run)
 
 
+def run_corpus_export(client, *, out_dir, all_fields=True, start_date=None, end_date=None,
+                      dry_run=False, customer_id=None, all_companies=False):
+    companies = client.list_companies() if all_companies else [None]
+    frm = to_api_date(start_date) if start_date else None
+    to = to_api_date(end_date) if end_date else None
+    namer = ZipNamer()  # shared across companies → receipt names de-dup globally
+    all_rows, all_stored, all_failures = [], [], []
+    total = 0
+    receipts_available = 0
+    for company in companies:
+        company_name = None
+        if company is not None:
+            client.company_id = company.get("id")
+            company_name = company.get("name")
+        category_map = _category_map(client) if all_fields else None
+        expenses = client.list_expenses(customer_id=customer_id, from_date=frm, to_date=to)
+        total += len(expenses)
+        rows, stored, failures, avail = _collect_rows(
+            client, expenses, namer, all_fields=all_fields, category_map=category_map,
+            company_name=company_name, dry_run=dry_run)
+        all_rows += rows
+        all_stored += stored
+        all_failures += failures
+        receipts_available += avail
+    if start_date and end_date:
+        span = "%s-%s" % (to_filename_date(start_date), to_filename_date(end_date))
+    else:
+        span = "all-time"
+    stem = "all-expenses_%s" % span
+    columns = CSV_COLUMNS_ALL if all_fields else CSV_COLUMNS
+    return _write_export(all_rows, all_stored, all_failures, receipts_available,
+                         total, out_dir, stem, columns, dry_run)
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Export InvoiceShelf expenses (CSV) and receipts (zip) for a client and date range.")

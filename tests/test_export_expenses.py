@@ -611,6 +611,75 @@ class RunExportAllFieldsTests(unittest.TestCase):
         self.assertEqual(header, ",".join(ee.CSV_COLUMNS))
 
 
+class _CorpusClient:
+    """Stub for corpus export: multiple companies, per-company expenses."""
+    def __init__(self, companies, expenses_by_company, categories=None):
+        self.companies = companies
+        self.expenses_by_company = expenses_by_company
+        self._categories = categories or [{"id": 8, "name": "Food"}]
+        self.company_id = "1"
+        self.calls = []  # (company_id, customer_id) per list_expenses
+
+    def list_companies(self):
+        return self.companies
+
+    def list_categories(self):
+        return self._categories
+
+    def list_expenses(self, customer_id=None, from_date=None, to_date=None):
+        self.calls.append((self.company_id, customer_id))
+        return self.expenses_by_company.get(self.company_id, [])
+
+    def download_receipt(self, expense_id):
+        return b"BYTES"
+
+
+def _cexp(id, number, company_hint):
+    return {"id": id, "expense_number": number, "expense_date": "2025-04-10",
+            "amount": 1000, "notes": company_hint, "currency": {"code": "INR", "precision": 2},
+            "expense_category_id": 8, "customer": {"id": 5, "name": "Cust-%s" % company_hint},
+            "exchange_rate": "1", "created_at": "2025-04-10T00:00:00Z",
+            "attachment_receipt_meta": None}
+
+
+class RunCorpusExportTests(unittest.TestCase):
+    def _out(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        return d
+
+    def test_all_companies_combined_csv(self):
+        client = _CorpusClient(
+            companies=[{"id": 2, "name": "Arpit Goyal"}, {"id": 3, "name": "PeopleEquation"}],
+            expenses_by_company={2: [_cexp(1, "A-1", "A")], 3: [_cexp(2, "B-1", "B")]})
+        summary = ee.run_corpus_export(
+            client, out_dir=self._out(), all_fields=True, all_companies=True)
+        self.assertEqual(summary.expense_count, 2)
+        with open(summary.csv_path, newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        self.assertEqual(list(rows[0].keys()), ee.CSV_COLUMNS_ALL)
+        companies = sorted(r["company"] for r in rows)
+        self.assertEqual(companies, ["Arpit Goyal", "PeopleEquation"])
+        self.assertTrue(os.path.basename(summary.csv_path).startswith("all-expenses_all-time"))
+
+    def test_all_clients_lists_without_customer_id(self):
+        client = _CorpusClient(
+            companies=[{"id": 2, "name": "Arpit Goyal"}],
+            expenses_by_company={2: [_cexp(1, "A-1", "A")]})
+        ee.run_corpus_export(client, out_dir=self._out(), all_fields=True, all_companies=True)
+        # every list_expenses call for the corpus must pass customer_id=None
+        self.assertTrue(all(cust is None for (_co, cust) in client.calls))
+        self.assertIn(2, [co for (co, _c) in client.calls])  # company header switched to 2
+
+    def test_dates_appear_in_stem_when_given(self):
+        client = _CorpusClient(companies=[{"id": 2, "name": "X"}],
+                               expenses_by_company={2: []})
+        summary = ee.run_corpus_export(
+            client, out_dir=self._out(), all_fields=True, all_companies=True,
+            start_date=datetime.date(2025, 4, 1), end_date=datetime.date(2025, 6, 30))
+        self.assertIn("01042025-30062025", os.path.basename(summary.csv_path))
+
+
 class CliTests(unittest.TestCase):
     def test_parser_reads_args(self):
         parser = ee.build_arg_parser()
