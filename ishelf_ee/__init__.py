@@ -15,6 +15,7 @@ import uuid
 import zipfile
 
 CSV_COLUMNS = ["expense_number", "expense_date", "amount", "currency", "notes", "receipt_file"]
+CSV_COLUMNS_ALL = CSV_COLUMNS + ["expense_id", "company", "client", "category", "exchange_rate", "created_at"]
 
 Config = typing.NamedTuple("Config", [
     ("url", str), ("email", str), ("password", str), ("company_id", str),
@@ -140,12 +141,12 @@ class ZipNamer:
             i += 1
 
 
-def expense_to_row(expense, receipt_file):
+def expense_to_row(expense, receipt_file, *, all_fields=False, category_map=None, company_name=None):
     currency = expense.get("currency") or {}
     precision = currency.get("precision", 2)
     if precision in (None, ""):
         precision = 2
-    return {
+    row = {
         "expense_number": expense.get("expense_number") or "",
         "expense_date": expense.get("expense_date") or "",
         "amount": scale_amount(expense.get("amount") or 0, precision),
@@ -153,11 +154,32 @@ def expense_to_row(expense, receipt_file):
         "notes": expense.get("notes") or "",
         "receipt_file": receipt_file or "",
     }
+    if not all_fields:
+        return row
+    category_map = category_map or {}
+    # Client: prefer a nested customer object, else the raw customer_id.
+    customer = expense.get("customer") or {}
+    client_name = customer.get("name") or (
+        str(expense["customer_id"]) if expense.get("customer_id") is not None else "")
+    # Category: prefer a nested category object, else resolve the id via the map.
+    cat = expense.get("category") or expense.get("expense_category")
+    cat_name = cat.get("name") if isinstance(cat, dict) else ""
+    if not cat_name:
+        cat_name = category_map.get(expense.get("expense_category_id"), "")
+    row.update({
+        "expense_id": expense.get("id") or "",
+        "company": company_name or "",
+        "client": client_name,
+        "category": cat_name,
+        "exchange_rate": expense.get("exchange_rate") or "",
+        "created_at": expense.get("created_at") or "",
+    })
+    return row
 
 
-def write_csv(rows, path):
+def write_csv(rows, path, columns=CSV_COLUMNS):
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)

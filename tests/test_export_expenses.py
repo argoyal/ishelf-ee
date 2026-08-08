@@ -149,6 +149,20 @@ class RowCsvTests(unittest.TestCase):
             "currency": {"code": "USD", "precision": 2},
         }
 
+    def _expense_full(self):
+        return {
+            "id": 42,
+            "expense_number": "EXP-000001",
+            "expense_date": "2025-04-15",
+            "amount": 123456,
+            "notes": "Taxi, airport",
+            "currency": {"code": "USD", "precision": 2},
+            "expense_category_id": 8,
+            "customer": {"id": 5, "name": "Ascendra Ventures"},
+            "exchange_rate": "1",
+            "created_at": "2025-04-15T10:00:00Z",
+        }
+
     def test_expense_to_row(self):
         row = ee.expense_to_row(self._expense(), "EXP-000001__taxi.pdf")
         self.assertEqual(row, {
@@ -180,6 +194,49 @@ class RowCsvTests(unittest.TestCase):
         self.assertEqual(list(got[0].keys()), ee.CSV_COLUMNS)
         self.assertEqual(got[0]["amount"], "1234.56")
         self.assertEqual(got[0]["notes"], "Taxi, airport")
+
+    def test_default_row_unchanged_when_not_all_fields(self):
+        row = ee.expense_to_row(self._expense(), "r.pdf")
+        self.assertEqual(list(row.keys()), ee.CSV_COLUMNS)
+
+    def test_all_fields_row_resolves_names(self):
+        row = ee.expense_to_row(
+            self._expense_full(), "EXP-000001__taxi.pdf",
+            all_fields=True, category_map={8: "Food"}, company_name="Arpit Goyal")
+        self.assertEqual(list(row.keys()), ee.CSV_COLUMNS_ALL)
+        self.assertEqual(row["expense_id"], 42)
+        self.assertEqual(row["company"], "Arpit Goyal")
+        self.assertEqual(row["client"], "Ascendra Ventures")
+        self.assertEqual(row["category"], "Food")
+        self.assertEqual(row["exchange_rate"], "1")
+        self.assertEqual(row["created_at"], "2025-04-15T10:00:00Z")
+
+    def test_all_fields_category_falls_back_to_nested_object(self):
+        exp = self._expense_full()
+        del exp["expense_category_id"]
+        exp["category"] = {"id": 8, "name": "Fuel"}
+        row = ee.expense_to_row(exp, "", all_fields=True, category_map={}, company_name="X")
+        self.assertEqual(row["category"], "Fuel")
+
+    def test_all_fields_client_falls_back_to_customer_id(self):
+        exp = self._expense_full()
+        del exp["customer"]
+        exp["customer_id"] = 77
+        row = ee.expense_to_row(exp, "", all_fields=True, category_map={8: "Food"}, company_name="X")
+        self.assertEqual(row["client"], "77")
+
+    def test_write_csv_all_columns(self):
+        rows = [ee.expense_to_row(self._expense_full(), "r.pdf",
+                                  all_fields=True, category_map={8: "Food"}, company_name="Arpit Goyal")]
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        self.addCleanup(os.remove, path)
+        ee.write_csv(rows, path, columns=ee.CSV_COLUMNS_ALL)
+        with open(path, newline="", encoding="utf-8") as f:
+            got = list(_csv.DictReader(f))
+        self.assertEqual(list(got[0].keys()), ee.CSV_COLUMNS_ALL)
+        self.assertEqual(got[0]["category"], "Food")
+        self.assertEqual(got[0]["company"], "Arpit Goyal")
 
 
 class ClientTests(unittest.TestCase):
