@@ -265,13 +265,15 @@ class InvoiceShelfClient:
         resp = self._request("GET", "/customers", query={"search": name, "limit": "all"})
         return resp.get("data", [])
 
-    def list_expenses(self, customer_id, from_date, to_date):
-        resp = self._request("GET", "/expenses", query={
-            "customer_id": customer_id,
-            "from_date": from_date,
-            "to_date": to_date,
-            "limit": "all",
-        })
+    def list_expenses(self, customer_id=None, from_date=None, to_date=None):
+        query = {"limit": "all"}
+        if customer_id is not None:
+            query["customer_id"] = customer_id
+        if from_date:
+            query["from_date"] = from_date
+        if to_date:
+            query["to_date"] = to_date
+        resp = self._request("GET", "/expenses", query=query)
         return resp.get("data", [])
 
     def download_receipt(self, expense_id):

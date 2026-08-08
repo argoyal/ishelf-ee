@@ -284,6 +284,23 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(captured["headers"]["company"], "1")
         self.assertEqual(captured["headers"]["authorization"], "Bearer tok123")
 
+    def test_list_expenses_omits_customer_when_none(self):
+        client = self._client()
+        client.token = "tok123"
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            return _fake_json_resp({"data": [{"id": 1}]})
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            data = client.list_expenses()  # no filters → whole company
+
+        self.assertEqual(data, [{"id": 1}])
+        self.assertNotIn("customer_id", captured["url"])
+        self.assertNotIn("from_date", captured["url"])
+        self.assertIn("limit=all", captured["url"])
+
     def test_download_receipt_returns_bytes(self):
         client = self._client()
         client.token = "tok123"
