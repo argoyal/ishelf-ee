@@ -67,6 +67,26 @@ the export; the name is resolved to its id (case-insensitive, exact match prefer
 `--company` overrides `INVOICESHELF_COMPANY_ID`. On an ambiguous or unknown name, the
 tool lists the available companies as `id — name` so you can pick.
 
+### Full-corpus export
+
+Export every field (not just the default six) and/or every company/client in one run:
+
+- `--export-all-fields` — widen the CSV to include `expense_id, company, client, category,
+  exchange_rate, created_at` (category/customer ids resolved to names). Without it, the export
+  is unchanged (six columns).
+- `--company all` — iterate every company.
+- `--client all` — include every client (no customer filter).
+
+In `all` mode, `--start`/`--end` are optional (omit for all-time) and the output is a single
+combined `all-expenses_<range>.csv` plus one combined receipts zip.
+
+```bash
+# Whole history, all companies/clients, all fields, with receipts:
+ee --company all --client all --export-all-fields --config ~/.personal/configs/ishelf-config.env
+```
+
+The default per-client export (`--client NAME --start … --end …`) is unchanged.
+
 ## Create an expense
 
 `ee create` logs a single expense to InvoiceShelf, optionally attaching a receipt. The
