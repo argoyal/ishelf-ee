@@ -783,3 +783,49 @@ class CliTests(unittest.TestCase):
              mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
             rc = ee.main(["--client", "Acme"])  # no dates, not corpus
         self.assertEqual(rc, 1)
+
+    def _no_login_client(self):
+        def _boom():
+            raise AssertionError("login must not be called")
+        fake = _ExportClient([])
+        fake.login = _boom
+        return fake
+
+    def test_company_all_with_named_client_rejected_before_login(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = self._no_login_client()
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "all", "--client", "Acme",
+                          "--start", "01042025", "--end", "30062025"])
+        self.assertEqual(rc, 1)
+
+    def test_company_all_with_customer_id_rejected_before_login(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = self._no_login_client()
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "all", "--customer-id", "7",
+                          "--start", "01042025", "--end", "30062025"])
+        self.assertEqual(rc, 1)
+
+    def test_company_all_client_all_still_works(self):
+        out = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, out)
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = _CorpusClient(companies=[{"id": 2, "name": "Arpit Goyal"}],
+                             expenses_by_company={2: [_cexp(1, "A-1", "A")]})
+        fake.login = lambda: "tok"
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--company", "all", "--client", "all",
+                          "--export-all-fields", "--out", out])
+        self.assertEqual(rc, 0)
+
+    def test_non_corpus_missing_client_fails_before_login(self):
+        cfg = ee.Config(url="https://x.example", email="m", password="p", company_id="1")
+        fake = self._no_login_client()
+        with mock.patch.object(ee, "load_config", lambda path: cfg), \
+             mock.patch.object(ee, "InvoiceShelfClient", lambda config: fake):
+            rc = ee.main(["--start", "01042025", "--end", "30062025"])  # no client, no customer-id
+        self.assertEqual(rc, 1)

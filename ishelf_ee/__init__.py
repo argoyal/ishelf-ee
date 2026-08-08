@@ -592,6 +592,15 @@ def run_export_cli(argv=None):
             raise ValueError("Provide --start and --end (DDMMYYYY), "
                              "or use --company all / --client all for the full corpus.")
 
+        if company_all and (
+                (args.client and not client_all) or args.customer_id is not None):
+            raise ValueError(
+                "--company all cannot be combined with a specific --client/--customer-id; "
+                "use --client all (or omit it) for the full corpus, or name a single --company.")
+
+        if not corpus and not args.client and args.customer_id is None:
+            raise ValueError("Provide --client NAME or --customer-id ID.")
+
         config = load_config(find_config_file(args.config))
         client = InvoiceShelfClient(config)
         client.login()
@@ -608,8 +617,6 @@ def run_export_cli(argv=None):
                 start_date=start, end_date=end, dry_run=args.dry_run,
                 customer_id=customer_id, all_companies=company_all)
         else:
-            if not args.client and args.customer_id is None:
-                raise ValueError("Provide --client NAME or --customer-id ID.")
             if args.company:
                 client.company_id = resolve_company_id(client, args.company)
             if args.customer_id is not None:
