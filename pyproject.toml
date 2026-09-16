@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ishelf-ee"
-version = "0.4.1"
+version = "0.5.0"
 description = "Export InvoiceShelf expenses to CSV and bundle their receipts into a zip, for a client and date range."
 readme = "README.md"
 requires-python = ">=3.8"

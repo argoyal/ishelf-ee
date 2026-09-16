@@ -107,6 +107,18 @@ default), and `--dry-run`.
 `--dry-run` prints the exact `POST /expenses` body without writing anything. Amounts are
 sent in minor units; a receipt is uploaded via `multipart/form-data`.
 
+### `ee delete`
+
+`ee delete` removes a single expense by its **expense number** (numbers are company-scoped, so
+`--company` is required):
+
+    ee delete --company "AsterHQ" --expense-number 0708202601
+
+Flags: `--company` (required, resolved by name), `--expense-number` (required), `--config`, and
+`--dry-run`. It looks the expense up by number and deletes it via `POST /expenses/delete`. If no
+expense matches — or more than one does — it errors and deletes nothing. `--dry-run` prints the
+expense that would be deleted without removing it.
+
 ## Troubleshooting
 
 **Cloudflare "Error 1010: Access denied" / HTTP 403 on login.** The instance is

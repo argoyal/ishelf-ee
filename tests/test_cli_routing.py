@@ -9,6 +9,11 @@ class TestSplitSubcommand(unittest.TestCase):
     def test_explicit_export(self):
         self.assertEqual(ee.split_subcommand(["export", "--client", "A"]), ("export", ["--client", "A"]))
 
+    def test_explicit_delete(self):
+        self.assertEqual(
+            ee.split_subcommand(["delete", "--expense-number", "N"]),
+            ("delete", ["--expense-number", "N"]))
+
     def test_no_subcommand_defaults_to_export(self):
         args = ["--client", "A", "--start", "01012025", "--end", "31012025"]
         self.assertEqual(ee.split_subcommand(args), ("export", args))

@@ -303,6 +303,11 @@ class InvoiceShelfClient:
             file_field=("attachment_receipt", filename, content, ctype))
         return self._request_multipart("POST", "/expenses", data, content_type)
 
+    def delete_expenses(self, ids):
+        # InvoiceShelf deletes expenses via POST /expenses/delete with an ids array
+        # (the canonical, tested endpoint; the RESTful destroy route also exists).
+        return self._request("POST", "/expenses/delete", body={"ids": list(ids)})
+
     def _request_multipart(self, method, path, data, content_type):
         url = self.base + path
         headers = {"Accept": "application/json", "User-Agent": self.user_agent,
@@ -441,7 +446,21 @@ def resolve_payment_method_id(client, name):
     return _resolve_by_name(client.list_payment_methods(), name, "payment method")
 
 
-SUBCOMMANDS = ("export", "create")
+def resolve_expense_by_number(client, number):
+    """Find the single company-scoped expense whose expense_number matches. Raises
+    LookupError if none or more than one match (delete is destructive — never guess)."""
+    target = str(number)
+    matches = [e for e in client.list_expenses() if str(e.get("expense_number") or "") == target]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise LookupError("No expense with number %r under this company." % number)
+    listing = "\n".join("  id=%s date=%s amount=%s" % (
+        e.get("id"), e.get("expense_date"), e.get("amount")) for e in matches)
+    raise LookupError("Multiple expenses match number %r:\n%s" % (number, listing))
+
+
+SUBCOMMANDS = ("export", "create", "delete")
 
 
 def split_subcommand(argv):
@@ -719,12 +738,48 @@ def run_create_cli(argv=None):
         return 1
 
 
+def build_delete_parser():
+    p = argparse.ArgumentParser(
+        prog="ee delete", description="Delete one expense in InvoiceShelf by its expense number.")
+    p.add_argument("--company", required=True,
+                   help="Company the expense belongs to (expense numbers are company-scoped).")
+    p.add_argument("--expense-number", dest="expense_number", required=True,
+                   help="The expense_number to delete (e.g. 1509202603).")
+    p.add_argument("--config", default=None)
+    p.add_argument("--dry-run", action="store_true",
+                   help="Show the expense that would be deleted; delete nothing.")
+    return p
+
+
+def run_delete_cli(argv=None):
+    args = build_delete_parser().parse_args(argv)
+    try:
+        config = load_config(find_config_file(args.config))
+        client = InvoiceShelfClient(config)
+        client.login()
+        client.company_id = resolve_company_id(client, args.company)
+        exp = resolve_expense_by_number(client, args.expense_number)
+        eid = exp.get("id")
+        if args.dry_run:
+            print("DRY RUN — would delete expense number %s (id %s, date %s, amount %s)" % (
+                args.expense_number, eid, exp.get("expense_date"), exp.get("amount")))
+            return 0
+        client.delete_expenses([eid])
+        print("Deleted expense number %s (id %s)" % (args.expense_number, eid))
+        return 0
+    except (ValueError, LookupError, ApiError, OSError) as err:
+        print("Error: %s" % err, file=sys.stderr)
+        return 1
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
     sub, rest = split_subcommand(argv)
     if sub == "create":
         return run_create_cli(rest)
+    if sub == "delete":
+        return run_delete_cli(rest)
     return run_export_cli(rest)
 
 
