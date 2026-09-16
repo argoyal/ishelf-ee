@@ -38,6 +38,17 @@ class TestBuildBody(unittest.TestCase):
         self.assertEqual(body["customer_id"], 7)
         self.assertEqual(body["exchange_rate"], "83.1")
 
+    def test_includes_payment_method_when_given(self):
+        body = ee.build_expense_body(expense_date="2026-08-07", amount_minor=100,
+                                     category_id=3, currency_id=1, notes="",
+                                     payment_method_id=4)
+        self.assertEqual(body["payment_method_id"], 4)
+
+    def test_omits_payment_method_when_none(self):
+        body = ee.build_expense_body(expense_date="2026-08-07", amount_minor=100,
+                                     category_id=3, currency_id=1, notes="")
+        self.assertNotIn("payment_method_id", body)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -282,6 +282,9 @@ class InvoiceShelfClient:
     def list_categories(self):
         return _as_list(self._request("GET", "/categories", query={"limit": "all"}))
 
+    def list_payment_methods(self):
+        return _as_list(self._request("GET", "/payment-methods", query={"limit": "all"}))
+
     def list_currencies(self):
         return _as_list(self._request("GET", "/currencies"))
 
@@ -367,7 +370,8 @@ def amount_to_minor(amount_str, precision=2):
 
 
 def build_expense_body(*, expense_date, amount_minor, category_id, currency_id, notes,
-                       customer_id=None, exchange_rate=None, expense_number=None):
+                       customer_id=None, exchange_rate=None, expense_number=None,
+                       payment_method_id=None):
     body = {
         "expense_date": expense_date,
         "amount": int(amount_minor),
@@ -381,6 +385,8 @@ def build_expense_body(*, expense_date, amount_minor, category_id, currency_id, 
         body["exchange_rate"] = exchange_rate
     if expense_number:
         body["expense_number"] = expense_number
+    if payment_method_id is not None:
+        body["payment_method_id"] = payment_method_id
     return body
 
 
@@ -429,6 +435,10 @@ def resolve_category_id(client, name):
 
 def resolve_currency_id(client, code):
     return _resolve_by_name(client.list_currencies(), code, "currency", key="code")
+
+
+def resolve_payment_method_id(client, name):
+    return _resolve_by_name(client.list_payment_methods(), name, "payment method")
 
 
 SUBCOMMANDS = ("export", "create")
@@ -661,6 +671,9 @@ def build_create_parser():
                         "(NN = count of expenses on that date + 1, e.g. 0708202601).")
     p.add_argument("--exchange-rate", dest="exchange_rate", default=None,
                    help="Required only if the currency differs from the company default.")
+    p.add_argument("--payment-method", dest="payment_method", default=None,
+                   help="Payment method name, e.g. 'Credit Card' (optional). Resolved to its "
+                        "InvoiceShelf payment_method_id.")
     p.add_argument("--receipt", default=None, help="Path to a receipt file to attach.")
     p.add_argument("--config", default=None)
     p.add_argument("--dry-run", action="store_true")
@@ -679,11 +692,14 @@ def run_create_cli(argv=None):
         currency_id = resolve_currency_id(client, args.currency)
         category_id = resolve_category_id(client, args.category)
         customer_id = resolve_customer_id(client, args.client) if args.client else None
+        payment_method_id = (resolve_payment_method_id(client, args.payment_method)
+                             if args.payment_method else None)
         number = args.expense_number or next_expense_number(args.date, client.count_expenses_on_date(date))
         body = build_expense_body(
             expense_date=date, amount_minor=amount_minor, category_id=category_id,
             currency_id=currency_id, notes=args.notes, customer_id=customer_id,
-            exchange_rate=args.exchange_rate, expense_number=number)
+            exchange_rate=args.exchange_rate, expense_number=number,
+            payment_method_id=payment_method_id)
         if args.dry_run:
             print("DRY RUN — POST /expenses")
             print(json.dumps(body, indent=2, sort_keys=True))

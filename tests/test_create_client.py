@@ -27,6 +27,15 @@ class TestResolvers(unittest.TestCase):
             with self.assertRaises(LookupError):
                 ee.resolve_category_id(c, "Nope")
 
+    def test_resolve_payment_method_hits_endpoint(self):
+        c = _client()
+        with mock.patch.object(
+                c, "_request",
+                return_value={"data": [{"id": 4, "name": "Credit Card"},
+                                       {"id": 5, "name": "Cash"}]}) as m:
+            self.assertEqual(ee.resolve_payment_method_id(c, "Credit Card"), 4)
+        m.assert_called_once_with("GET", "/payment-methods", query={"limit": "all"})
+
 
 class TestCreateExpense(unittest.TestCase):
     def test_create_posts_json_when_no_receipt(self):

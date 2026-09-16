@@ -94,11 +94,13 @@ export commands are unchanged — `ee …` with no subcommand still exports, and
 is the explicit form.
 
     ee create --company "AsterHQ" --amount 12.34 --currency USD --date 07082026 \
-              --category "Software" --notes "Anthropic" --receipt ./receipt.png
+              --category "Software" --notes "Anthropic" --payment-method "Credit Card" \
+              --receipt ./receipt.png
 
 Flags: `--company` (required, resolved by name), `--amount` (decimal), `--currency` (code,
 e.g. `USD`), `--date` (`DDMMYYYY`), `--category` (required, resolved by name),
-`--notes`/`--vendor`, `--customer` (optional), `--receipt PATH` (uploaded as
+`--notes`/`--vendor`, `--customer` (optional), `--payment-method` (optional, resolved by
+name to its `payment_method_id`, e.g. `"Credit Card"`), `--receipt PATH` (uploaded as
 `attachment_receipt`), `--exchange-rate` (only when the currency differs from the company
 default), and `--dry-run`.
 

@@ -56,6 +56,21 @@ class TestCreateDryRun(unittest.TestCase):
         self.assertIn('"customer_id": 5', out)
         self.assertIn('"amount": 3000', out)
 
+    def test_payment_method_sets_id(self):
+        with mock.patch.object(ee, "resolve_payment_method_id", return_value=4):
+            rc, out = _run(["create", "--company", "Arpit Goyal", "--amount", "10.00",
+                            "--currency", "INR", "--date", "07082026", "--category", "Fuel",
+                            "--payment-method", "Credit Card", "--dry-run"], count=0)
+        self.assertEqual(rc, 0)
+        self.assertIn('"payment_method_id": 4', out)
+
+    def test_no_payment_method_omits_id(self):
+        rc, out = _run(["create", "--company", "Arpit Goyal", "--amount", "10.00",
+                        "--currency", "INR", "--date", "07082026", "--category", "Fuel",
+                        "--dry-run"], count=0)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("payment_method_id", out)
+
 
 if __name__ == "__main__":
     unittest.main()
