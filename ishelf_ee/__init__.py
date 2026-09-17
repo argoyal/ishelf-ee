@@ -172,7 +172,9 @@ def expense_to_row(expense, receipt_file, *, all_fields=False, category_map=None
         "client": client_name,
         "category": cat_name,
         "exchange_rate": expense.get("exchange_rate") or "",
-        "created_at": expense.get("created_at") or "",
+        # InvoiceShelf's API exposes only `formatted_created_at` (the creation date in the company's
+        # display format); fall back to a raw `created_at` if a future API/version provides one.
+        "created_at": expense.get("formatted_created_at") or expense.get("created_at") or "",
     })
     return row
 

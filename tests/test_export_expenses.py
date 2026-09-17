@@ -211,6 +211,15 @@ class RowCsvTests(unittest.TestCase):
         self.assertEqual(row["exchange_rate"], "1")
         self.assertEqual(row["created_at"], "2025-04-15T10:00:00Z")
 
+    def test_all_fields_created_at_prefers_formatted(self):
+        # The live InvoiceShelf API exposes only `formatted_created_at` (the creation date), not a
+        # raw `created_at`; the export must emit it so consumers get a real logged-on date.
+        exp = self._expense_full()
+        exp.pop("created_at")
+        exp["formatted_created_at"] = "17 Sep 2026"
+        row = ee.expense_to_row(exp, "", all_fields=True, category_map={8: "Food"}, company_name="X")
+        self.assertEqual(row["created_at"], "17 Sep 2026")
+
     def test_all_fields_category_falls_back_to_nested_object(self):
         exp = self._expense_full()
         del exp["expense_category_id"]
