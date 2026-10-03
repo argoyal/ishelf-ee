@@ -119,6 +119,62 @@ Flags: `--company` (required, resolved by name), `--expense-number` (required), 
 expense matches — or more than one does — it errors and deletes nothing. `--dry-run` prints the
 expense that would be deleted without removing it.
 
+## Invoices and payments
+
+`ee invoice …` and `ee payment …` each have four verbs: `create`, `list`, `export`, `delete`.
+Every one needs `--company`; all take `--config`.
+
+**Currency.** InvoiceShelf always bills a customer in *that customer's* currency. When it
+differs from the company currency (e.g. a USD client of an INR company), you must give the
+INR value too, one of:
+
+- `--inr-amount` — the INR the bank actually credited (e.g. the eFIRC amount). The exchange
+  rate is worked out from it, so the INR InvoiceShelf stores matches the bank.
+- `--exchange-rate` — the rate itself.
+
+For a customer in the company currency, leave both out.
+
+### `ee invoice create`
+
+    ee invoice create --company "Ascendra Ventures" --client "Aster AI" --date 30092026 \
+                      --item "Consulting Sep 2026=3781" --currency USD --inr-amount 355639.79
+
+- `--item "NAME=PRICE"` or `"NAME=PRICE@QTY"` (price per unit). Repeat for more lines. No taxes
+  or discounts.
+- `--due-date DDMMYYYY`, `--notes`, `--template` (default `invoice1`) are optional.
+- `--invoice-number` is optional; by default InvoiceShelf's next number is used (e.g. `INV-000012`).
+- `--currency` is only a safety check: it fails if the customer is not billed in that currency.
+- The invoice is created as a draft.
+
+### `ee payment create`
+
+    ee payment create --company "Ascendra Ventures" --invoice INV-000012 --amount 3781 \
+                      --inr-amount 355639.79 --date 01102026 --payment-method "Bank Transfer" \
+                      --notes "eFIRC CITIN26740027028"
+
+- `--invoice NUMBER` links the payment to an invoice; the customer and currency come from it,
+  and a payment larger than the invoice's due amount is refused. Without `--invoice`, pass
+  `--client` instead.
+- `--amount` is in the customer's currency. `--payment-method` is resolved by name within the
+  company. `--payment-number` is optional (next number by default).
+- InvoiceShelf 2.4.1 payments **cannot carry attachments**, so put the eFIRC / reference number
+  in `--notes`.
+
+### list, export, delete
+
+    ee invoice list   --company "Ascendra Ventures" [--client "Aster AI"] [--start 01092026 --end 30092026]
+    ee payment export --company "Ascendra Ventures" [--client …] [--start … --end …] [--out DIR] [--dry-run]
+    ee invoice delete --company "Ascendra Ventures" --invoice-number INV-000012 [--dry-run]
+    ee payment delete --company "Ascendra Ventures" --payment-number PAY-000019 [--dry-run]
+
+`list` prints a table; `export` writes `invoices_<client or company>_<range|all-time>.csv` (or
+`payments_…`) with every field, including the INR `base_total` / `base_amount`. Leave out
+`--start`/`--end` for all time. `delete` finds the record by exact number and errors if none or
+several match. InvoiceShelf refuses to delete an invoice that still has payments; deleting a
+payment puts its amount back on the invoice's due amount.
+
+All `create` and `delete` commands take `--dry-run`, which prints the request and changes nothing.
+
 ## Troubleshooting
 
 **Cloudflare "Error 1010: Access denied" / HTTP 403 on login.** The instance is
