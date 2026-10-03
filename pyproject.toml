@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ishelf-ee"
-version = "0.5.1"
-description = "Export InvoiceShelf expenses to CSV and bundle their receipts into a zip, for a client and date range."
+version = "0.6.0"
+description = "InvoiceShelf from the command line: export and log expenses (with receipts), create invoices and record payments."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Arpit Goyal", email = "hunterarpit@gmail.com" }]
-keywords = ["invoiceshelf", "expenses", "receipts", "csv", "export", "bookkeeping", "accounting"]
+keywords = ["invoiceshelf", "expenses", "invoices", "payments", "receipts", "csv", "export", "bookkeeping", "accounting"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",

@@ -310,6 +310,51 @@ class InvoiceShelfClient:
         # (the canonical, tested endpoint; the RESTful destroy route also exists).
         return self._request("POST", "/expenses/delete", body={"ids": list(ids)})
 
+    def list_invoices(self, customer_id=None, from_date=None, to_date=None):
+        return self._list("/invoices", customer_id, from_date, to_date)
+
+    def create_invoice(self, body):
+        return self._request("POST", "/invoices", body=body)
+
+    def delete_invoices(self, ids):
+        # The server refuses to delete an invoice that still has payments.
+        return self._request("POST", "/invoices/delete", body={"ids": list(ids)})
+
+    def list_payments(self, customer_id=None, from_date=None, to_date=None):
+        return self._list("/payments", customer_id, from_date, to_date)
+
+    def create_payment(self, body):
+        # InvoiceShelf 2.4.1 payments take no file attachment (no field, no upload route).
+        return self._request("POST", "/payments", body=body)
+
+    def delete_payments(self, ids):
+        # Deleting a payment adds its amount back to the invoice's due amount.
+        return self._request("POST", "/payments/delete", body={"ids": list(ids)})
+
+    def _list(self, path, customer_id, from_date, to_date):
+        query = {"limit": "all"}
+        if customer_id is not None:
+            query["customer_id"] = customer_id
+        if from_date:
+            query["from_date"] = from_date
+        if to_date:
+            query["to_date"] = to_date
+        return _as_list(self._request("GET", path, query=query))
+
+    def next_number(self, key, customer_id=None):
+        """The server's next invoice/payment number, in the company's configured format."""
+        query = {"key": key}
+        if customer_id is not None:
+            query["userId"] = customer_id
+        resp = self._request("GET", "/next-number", query=query) or {}
+        if not resp.get("success") or not resp.get("nextNumber"):
+            raise ApiError("Could not get the next %s number: %s" % (key, resp.get("message") or resp))
+        return resp["nextNumber"]
+
+    def get_company_currency_id(self):
+        resp = self._request("GET", "/company/settings", query=[("settings[]", "currency")])
+        return int(resp["currency"])
+
     def _request_multipart(self, method, path, data, content_type):
         url = self.base + path
         headers = {"Accept": "application/json", "User-Agent": self.user_agent,
@@ -330,14 +375,20 @@ class InvoiceShelfClient:
 
 
 def resolve_customer_id(client, name):
+    return int(resolve_customer(client, name)["id"])
+
+
+def resolve_customer(client, name):
+    """Like resolve_customer_id, but returns the whole customer record (needed for
+    its currency_id when billing)."""
     customers = client.find_customers(name)
     if not customers:
         raise LookupError("No customer found matching %r." % name)
     exact = [c for c in customers if (c.get("name") or "").lower() == name.lower()]
     if len(exact) == 1:
-        return int(exact[0]["id"])
+        return exact[0]
     if len(exact) == 0 and len(customers) == 1:
-        return int(customers[0]["id"])
+        return customers[0]
     candidates = exact if exact else customers
     listing = "\n".join("  %s — %s" % (c.get("id"), c.get("name")) for c in candidates)
     raise LookupError(
@@ -462,7 +513,229 @@ def resolve_expense_by_number(client, number):
     raise LookupError("Multiple expenses match number %r:\n%s" % (number, listing))
 
 
-SUBCOMMANDS = ("export", "create", "delete")
+def _resolve_by_number(items, field, number, kind):
+    """Find the one record whose `field` equals number exactly. Raises LookupError
+    on none or several (delete is destructive — never guess)."""
+    target = str(number)
+    matches = [i for i in items if str(i.get(field) or "") == target]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise LookupError("No %s with number %r under this company." % (kind, number))
+    listing = "\n".join("  id=%s" % i.get("id") for i in matches)
+    raise LookupError("Multiple %ss match number %r:\n%s" % (kind, number, listing))
+
+
+def resolve_invoice_by_number(client, number):
+    return _resolve_by_number(client.list_invoices(), "invoice_number", number, "invoice")
+
+
+def resolve_payment_by_number(client, number):
+    return _resolve_by_number(client.list_payments(), "payment_number", number, "payment")
+
+
+def parse_item(spec, precision=2):
+    """Parse an --item value 'NAME=PRICE' or 'NAME=PRICE@QTY' (PRICE per unit, QTY
+    defaults to 1). The name may itself contain '='; the last one splits."""
+    name, sep, rest = (spec or "").rpartition("=")
+    name = name.strip()
+    if not sep or not name:
+        raise ValueError("--item must look like 'NAME=PRICE' or 'NAME=PRICE@QTY', got %r" % spec)
+    price, _, qty = rest.partition("@")
+    price_minor = amount_to_minor(price.strip(), precision)
+    if price_minor <= 0:
+        raise ValueError("--item price must be positive, got %r" % spec)
+    qty = qty.strip() or "1"
+    try:
+        if decimal.Decimal(qty) <= 0:
+            raise ValueError
+    except (decimal.InvalidOperation, ValueError):
+        raise ValueError("--item quantity must be a positive number, got %r" % spec)
+    return {"name": name, "price_minor": price_minor, "quantity": qty}
+
+
+def _item_total(item):
+    total = decimal.Decimal(item["price_minor"]) * decimal.Decimal(item["quantity"])
+    return int(total.quantize(decimal.Decimal(1), rounding=decimal.ROUND_HALF_UP))
+
+
+def resolve_exchange_rate(*, foreign, amount_minor, exchange_rate=None, inr_amount=None,
+                          precision=2):
+    """The exchange_rate to send, or None when the customer is billed in the company's
+    own currency. For a foreign-currency customer, --inr-amount (what the bank actually
+    credited, e.g. from the eFIRC) is turned into a rate so the INR value InvoiceShelf
+    stores matches the bank."""
+    if not foreign:
+        if exchange_rate is not None or inr_amount is not None:
+            raise ValueError("This customer is billed in the company currency; "
+                             "drop --exchange-rate/--inr-amount.")
+        return None
+    if exchange_rate is not None and inr_amount is not None:
+        raise ValueError("Pass only one of --exchange-rate or --inr-amount.")
+    if exchange_rate is not None:
+        try:
+            rate = decimal.Decimal(str(exchange_rate))
+        except decimal.InvalidOperation:
+            raise ValueError("--exchange-rate must be a number, got %r" % (exchange_rate,))
+        if rate <= 0:
+            raise ValueError("--exchange-rate must be positive, got %r" % (exchange_rate,))
+        return str(exchange_rate)
+    if inr_amount is not None:
+        inr_minor = amount_to_minor(inr_amount, precision)
+        if inr_minor <= 0 or amount_minor <= 0:
+            raise ValueError("--inr-amount and the amount must both be positive.")
+        # exchange_rate is decimal(19,6) in InvoiceShelf.
+        rate = (decimal.Decimal(inr_minor) / decimal.Decimal(amount_minor)).quantize(
+            decimal.Decimal("0.000001"), rounding=decimal.ROUND_HALF_UP)
+        return str(rate)
+    raise ValueError("This customer is billed in a foreign currency. Pass --inr-amount "
+                     "(the INR the bank credited, e.g. from the eFIRC) or --exchange-rate.")
+
+
+def base_minor(amount_minor, exchange_rate):
+    """The company-currency value InvoiceShelf will store (amount * exchange_rate)."""
+    if exchange_rate is None:
+        return int(amount_minor)
+    value = decimal.Decimal(int(amount_minor)) * decimal.Decimal(str(exchange_rate))
+    return int(value.quantize(decimal.Decimal(1), rounding=decimal.ROUND_HALF_UP))
+
+
+def build_invoice_body(*, invoice_date, due_date, customer_id, invoice_number, currency_id,
+                       exchange_rate, items, notes, template_name):
+    # No discounts or taxes. The server recomputes totals from the items anyway;
+    # we send matching ones because the request requires them.
+    lines = []
+    for item in items:
+        total = _item_total(item)
+        lines.append({
+            "name": item["name"],
+            "description": None,
+            "quantity": item["quantity"],
+            "price": item["price_minor"],
+            "discount_type": "fixed",
+            "discount": 0,
+            "discount_val": 0,
+            "tax": 0,
+            "total": total,
+        })
+    sub_total = sum(line["total"] for line in lines)
+    body = {
+        "invoice_date": invoice_date,
+        "customer_id": customer_id,
+        "invoice_number": invoice_number,
+        "currency_id": currency_id,
+        "discount_type": "fixed",
+        "discount": 0,
+        "discount_val": 0,
+        "sub_total": sub_total,
+        "tax": 0,
+        "total": sub_total,
+        "template_name": template_name,
+        "notes": notes or "",
+        "items": lines,
+        "taxes": [],
+    }
+    if due_date:
+        body["due_date"] = due_date
+    if exchange_rate is not None:
+        body["exchange_rate"] = exchange_rate
+    return body
+
+
+def build_payment_body(*, payment_date, customer_id, payment_number, amount_minor, currency_id,
+                       invoice_id, exchange_rate, payment_method_id, notes):
+    body = {
+        "payment_date": payment_date,
+        "customer_id": customer_id,
+        "payment_number": payment_number,
+        "amount": int(amount_minor),
+        "currency_id": currency_id,
+        "notes": notes or "",
+    }
+    if invoice_id is not None:
+        body["invoice_id"] = invoice_id
+    if exchange_rate is not None:
+        body["exchange_rate"] = exchange_rate
+    if payment_method_id is not None:
+        body["payment_method_id"] = payment_method_id
+    return body
+
+
+INVOICE_COLUMNS = ["invoice_number", "invoice_date", "due_date", "customer", "currency", "total",
+                   "due_amount", "exchange_rate", "base_total", "status", "paid_status", "notes",
+                   "invoice_id", "created_at"]
+PAYMENT_COLUMNS = ["payment_number", "payment_date", "customer", "invoice_number", "currency",
+                   "amount", "exchange_rate", "base_amount", "payment_method", "notes",
+                   "payment_id", "created_at"]
+INVOICE_LIST_COLUMNS = ["invoice_number", "invoice_date", "customer", "currency", "total",
+                        "due_amount", "base_total", "paid_status"]
+PAYMENT_LIST_COLUMNS = ["payment_number", "payment_date", "customer", "invoice_number",
+                        "currency", "amount", "base_amount", "payment_method"]
+
+
+def _nested_name(record, key, field="name"):
+    obj = record.get(key)
+    return (obj.get(field) or "") if isinstance(obj, dict) else ""
+
+
+def _precision(record):
+    currency = record.get("currency") or {}
+    precision = currency.get("precision", 2)
+    return 2 if precision in (None, "") else precision
+
+
+def _scaled(value, precision=2):
+    return "" if value in (None, "") else scale_amount(value, precision)
+
+
+def invoice_to_row(inv):
+    p = _precision(inv)
+    return {
+        "invoice_number": inv.get("invoice_number") or "",
+        "invoice_date": inv.get("invoice_date") or "",
+        "due_date": inv.get("due_date") or "",
+        "customer": _nested_name(inv, "customer") or str(inv.get("customer_id") or ""),
+        "currency": _nested_name(inv, "currency", "code"),
+        "total": _scaled(inv.get("total"), p),
+        "due_amount": _scaled(inv.get("due_amount"), p),
+        "exchange_rate": inv.get("exchange_rate") or "",
+        # base_* values are in the company currency (2 decimals for INR).
+        "base_total": _scaled(inv.get("base_total")),
+        "status": inv.get("status") or "",
+        "paid_status": inv.get("paid_status") or "",
+        "notes": inv.get("notes") or "",
+        "invoice_id": inv.get("id") or "",
+        "created_at": inv.get("formatted_created_at") or inv.get("created_at") or "",
+    }
+
+
+def payment_to_row(pay):
+    p = _precision(pay)
+    return {
+        "payment_number": pay.get("payment_number") or "",
+        "payment_date": pay.get("payment_date") or "",
+        "customer": _nested_name(pay, "customer") or pay.get("name") or "",
+        "invoice_number": _nested_name(pay, "invoice", "invoice_number") or pay.get("invoice_number") or "",
+        "currency": _nested_name(pay, "currency", "code"),
+        "amount": _scaled(pay.get("amount"), p),
+        "exchange_rate": pay.get("exchange_rate") or "",
+        "base_amount": _scaled(pay.get("base_amount")),
+        "payment_method": _nested_name(pay, "payment_method") or pay.get("payment_mode") or "",
+        "notes": pay.get("notes") or "",
+        "payment_id": pay.get("id") or "",
+        "created_at": pay.get("formatted_created_at") or pay.get("created_at") or "",
+    }
+
+
+def format_table(rows, columns):
+    widths = {c: max([len(c)] + [len(str(r.get(c, ""))) for r in rows]) for c in columns}
+    lines = ["  ".join(c.ljust(widths[c]) for c in columns)]
+    for r in rows:
+        lines.append("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in columns))
+    return "\n".join(line.rstrip() for line in lines)
+
+
+SUBCOMMANDS = ("export", "create", "delete", "invoice", "payment")
 
 
 def split_subcommand(argv):
@@ -774,10 +1047,292 @@ def run_delete_cli(argv=None):
         return 1
 
 
+def _connect(args):
+    """Log in and scope the client to --company."""
+    config = load_config(find_config_file(args.config))
+    client = InvoiceShelfClient(config)
+    client.login()
+    client.company_id = resolve_company_id(client, args.company)
+    return client
+
+
+def _customer_currency_code(client, customer):
+    code = _nested_name(customer, "currency", "code")
+    if code:
+        return code
+    wanted = int(customer["currency_id"])
+    for cur in client.list_currencies():
+        if int(cur.get("id")) == wanted:
+            return cur.get("code") or ""
+    return ""
+
+
+def _print_base(label, amount_minor, rate):
+    if rate is not None:
+        print("%s %s x rate %s = %s in company currency" % (
+            label, scale_amount(amount_minor), rate, scale_amount(base_minor(amount_minor, rate))))
+
+
+def _add_rate_flags(p):
+    p.add_argument("--inr-amount", dest="inr_amount", default=None,
+                   help="Foreign-currency customers only: the INR amount the bank credited "
+                        "(e.g. from the eFIRC). The exchange rate is worked out from it.")
+    p.add_argument("--exchange-rate", dest="exchange_rate", default=None,
+                   help="Foreign-currency customers only: the rate to use instead of --inr-amount.")
+
+
+def build_invoice_create_parser():
+    p = argparse.ArgumentParser(prog="ee invoice create", description="Create one invoice in InvoiceShelf.")
+    p.add_argument("--company", required=True)
+    p.add_argument("--client", "--customer", dest="client", required=True,
+                   help="Customer to bill. The invoice is always in this customer's currency.")
+    p.add_argument("--date", required=True, help="Invoice date, DDMMYYYY.")
+    p.add_argument("--due-date", dest="due_date", default=None, help="Due date, DDMMYYYY (optional).")
+    p.add_argument("--item", action="append", required=True,
+                   help="Line item 'NAME=PRICE' or 'NAME=PRICE@QTY' (PRICE per unit). Repeatable.")
+    p.add_argument("--currency", default=None,
+                   help="Optional safety check: fail unless the customer's currency is this code.")
+    _add_rate_flags(p)
+    p.add_argument("--invoice-number", dest="invoice_number", default=None,
+                   help="Invoice number. If omitted, InvoiceShelf's next number is used.")
+    p.add_argument("--notes", default="")
+    p.add_argument("--template", default="invoice1", help="Invoice PDF template (default invoice1).")
+    p.add_argument("--config", default=None)
+    p.add_argument("--dry-run", action="store_true")
+    return p
+
+
+def run_invoice_create_cli(argv=None):
+    args = build_invoice_create_parser().parse_args(argv)
+    try:
+        date = to_api_date(parse_ddmmyyyy(args.date))
+        due = to_api_date(parse_ddmmyyyy(args.due_date)) if args.due_date else None
+        items = [parse_item(spec) for spec in args.item]
+        total = sum(_item_total(i) for i in items)
+        client = _connect(args)
+        customer = resolve_customer(client, args.client)
+        currency_id = int(customer["currency_id"])
+        if args.currency:
+            code = _customer_currency_code(client, customer)
+            if code.upper() != args.currency.upper():
+                raise ValueError("%s is billed in %s, not %s (InvoiceShelf always invoices in the "
+                                 "customer's currency)." % (customer.get("name"), code, args.currency))
+        rate = resolve_exchange_rate(
+            foreign=currency_id != client.get_company_currency_id(), amount_minor=total,
+            exchange_rate=args.exchange_rate, inr_amount=args.inr_amount)
+        number = args.invoice_number or client.next_number("invoice", customer["id"])
+        body = build_invoice_body(
+            invoice_date=date, due_date=due, customer_id=int(customer["id"]),
+            invoice_number=number, currency_id=currency_id, exchange_rate=rate, items=items,
+            notes=args.notes, template_name=args.template)
+        if args.dry_run:
+            print("DRY RUN — POST /invoices")
+            print(json.dumps(body, indent=2, sort_keys=True))
+            _print_base("Total", total, rate)
+            return 0
+        out = client.create_invoice(body)
+        inv = out.get("data") or out
+        print("Created invoice %s (id %s)" % (inv.get("invoice_number") or number, inv.get("id")))
+        _print_base("Total", total, rate)
+        return 0
+    except (ValueError, LookupError, ApiError, OSError) as err:
+        print("Error: %s" % err, file=sys.stderr)
+        return 1
+
+
+def build_payment_create_parser():
+    p = argparse.ArgumentParser(
+        prog="ee payment create",
+        description="Record one payment received, optionally against an invoice.")
+    p.add_argument("--company", required=True)
+    p.add_argument("--invoice", default=None,
+                   help="Invoice number the payment settles (customer and currency come from it).")
+    p.add_argument("--client", "--customer", dest="client", default=None,
+                   help="Customer who paid. Required without --invoice; checked against it with one.")
+    p.add_argument("--amount", required=True,
+                   help="Amount in the customer's currency (e.g. 3781 for a USD customer).")
+    p.add_argument("--date", required=True, help="Payment date (bank credit date), DDMMYYYY.")
+    _add_rate_flags(p)
+    p.add_argument("--payment-method", dest="payment_method", default=None,
+                   help="Payment method name, e.g. 'Bank Transfer' (optional).")
+    p.add_argument("--payment-number", dest="payment_number", default=None,
+                   help="Payment number. If omitted, InvoiceShelf's next number is used.")
+    p.add_argument("--notes", default="",
+                   help="Notes, e.g. the eFIRC number (payments cannot carry attachments).")
+    p.add_argument("--config", default=None)
+    p.add_argument("--dry-run", action="store_true")
+    return p
+
+
+def run_payment_create_cli(argv=None):
+    args = build_payment_create_parser().parse_args(argv)
+    try:
+        if not args.invoice and not args.client:
+            raise ValueError("Provide --invoice NUMBER or --client NAME.")
+        date = to_api_date(parse_ddmmyyyy(args.date))
+        amount_minor = amount_to_minor(args.amount, 2)
+        if amount_minor <= 0:
+            raise ValueError("--amount must be positive.")
+        client = _connect(args)
+        invoice = None
+        if args.invoice:
+            invoice = resolve_invoice_by_number(client, args.invoice)
+            customer_id = int(invoice["customer_id"])
+            currency_id = int(invoice["currency_id"])
+            if args.client and int(resolve_customer(client, args.client)["id"]) != customer_id:
+                raise ValueError("Invoice %s belongs to a different customer than %r."
+                                 % (args.invoice, args.client))
+            due = int(invoice.get("due_amount") or 0)
+            if amount_minor > due:
+                raise ValueError("Payment %s exceeds invoice %s's due amount %s."
+                                 % (scale_amount(amount_minor), args.invoice, scale_amount(due)))
+        else:
+            customer = resolve_customer(client, args.client)
+            customer_id = int(customer["id"])
+            currency_id = int(customer["currency_id"])
+        rate = resolve_exchange_rate(
+            foreign=currency_id != client.get_company_currency_id(), amount_minor=amount_minor,
+            exchange_rate=args.exchange_rate, inr_amount=args.inr_amount)
+        payment_method_id = (resolve_payment_method_id(client, args.payment_method)
+                             if args.payment_method else None)
+        number = args.payment_number or client.next_number("payment", customer_id)
+        body = build_payment_body(
+            payment_date=date, customer_id=customer_id, payment_number=number,
+            amount_minor=amount_minor, currency_id=currency_id,
+            invoice_id=int(invoice["id"]) if invoice else None, exchange_rate=rate,
+            payment_method_id=payment_method_id, notes=args.notes)
+        if args.dry_run:
+            print("DRY RUN — POST /payments")
+            print(json.dumps(body, indent=2, sort_keys=True))
+            _print_base("Amount", amount_minor, rate)
+            return 0
+        out = client.create_payment(body)
+        pay = out.get("data") or out
+        print("Recorded payment %s (id %s)" % (pay.get("payment_number") or number, pay.get("id")))
+        _print_base("Amount", amount_minor, rate)
+        return 0
+    except (ValueError, LookupError, ApiError, OSError) as err:
+        print("Error: %s" % err, file=sys.stderr)
+        return 1
+
+
+# Per-document settings shared by `ee invoice …` and `ee payment …` list/export/delete.
+_DOCS = {
+    "invoice": {"plural": "invoices", "list": "list_invoices", "delete": "delete_invoices",
+                "resolve": resolve_invoice_by_number, "to_row": invoice_to_row,
+                "columns": INVOICE_COLUMNS, "list_columns": INVOICE_LIST_COLUMNS,
+                "number": "invoice_number", "date": "invoice_date", "amount": "total"},
+    "payment": {"plural": "payments", "list": "list_payments", "delete": "delete_payments",
+                "resolve": resolve_payment_by_number, "to_row": payment_to_row,
+                "columns": PAYMENT_COLUMNS, "list_columns": PAYMENT_LIST_COLUMNS,
+                "number": "payment_number", "date": "payment_date", "amount": "amount"},
+}
+
+
+def build_doc_query_parser(doc, verb):
+    p = argparse.ArgumentParser(prog="ee %s %s" % (doc, verb),
+                                description="%s %s from InvoiceShelf." % (verb.title(), _DOCS[doc]["plural"]))
+    p.add_argument("--company", required=True)
+    p.add_argument("--client", "--customer", dest="client", default=None)
+    p.add_argument("--start", default=None, help="Start date, inclusive, DDMMYYYY (needs --end).")
+    p.add_argument("--end", default=None, help="End date, inclusive, DDMMYYYY (needs --start).")
+    if verb == "export":
+        p.add_argument("--out", default="exports", help="Output directory (default: exports).")
+        p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--config", default=None)
+    return p
+
+
+def run_doc_query_cli(doc, verb, argv=None):
+    spec = _DOCS[doc]
+    args = build_doc_query_parser(doc, verb).parse_args(argv)
+    try:
+        if bool(args.start) != bool(args.end):
+            raise ValueError("Pass both --start and --end, or neither (all time).")
+        start = end = None
+        if args.start:
+            start, end = parse_ddmmyyyy(args.start), parse_ddmmyyyy(args.end)
+            validate_range(start, end)
+        client = _connect(args)
+        customer_id = int(resolve_customer(client, args.client)["id"]) if args.client else None
+        records = getattr(client, spec["list"])(
+            customer_id=customer_id, from_date=to_api_date(start) if start else None,
+            to_date=to_api_date(end) if end else None)
+        rows = [spec["to_row"](r) for r in records]
+    except (ValueError, LookupError, ApiError, OSError) as err:
+        print("Error: %s" % err, file=sys.stderr)
+        return 1
+    if verb == "list":
+        print(format_table(rows, spec["list_columns"]))
+        print("%d %s" % (len(rows), spec["plural"]))
+        return 0
+    span = ("%s-%s" % (to_filename_date(start), to_filename_date(end))) if start else "all-time"
+    path = os.path.join(args.out, "%s_%s_%s.csv" % (
+        spec["plural"], sanitize_filename(args.client or args.company), span))
+    print("%s: %d" % (spec["plural"].title(), len(rows)))
+    if args.dry_run:
+        print("Dry run — nothing written. CSV would be: %s" % path)
+        return 0
+    os.makedirs(args.out, exist_ok=True)
+    write_csv(rows, path, columns=spec["columns"])
+    print("CSV: %s" % path)
+    return 0
+
+
+def build_doc_delete_parser(doc):
+    flag = "--%s-number" % doc
+    p = argparse.ArgumentParser(prog="ee %s delete" % doc,
+                                description="Delete one %s in InvoiceShelf by its number." % doc)
+    p.add_argument("--company", required=True)
+    p.add_argument(flag, dest="number", required=True)
+    p.add_argument("--config", default=None)
+    p.add_argument("--dry-run", action="store_true",
+                   help="Show the %s that would be deleted; delete nothing." % doc)
+    return p
+
+
+def run_doc_delete_cli(doc, argv=None):
+    spec = _DOCS[doc]
+    args = build_doc_delete_parser(doc).parse_args(argv)
+    try:
+        client = _connect(args)
+        rec = spec["resolve"](client, args.number)
+        row = spec["to_row"](rec)
+        summary = "%s %s (id %s, date %s, amount %s %s)" % (
+            doc, args.number, rec.get("id"), row[spec["date"]], row[spec["amount"]], row["currency"])
+        if args.dry_run:
+            print("DRY RUN — would delete %s" % summary)
+            return 0
+        getattr(client, spec["delete"])([rec.get("id")])
+        print("Deleted %s" % summary)
+        return 0
+    except (ValueError, LookupError, ApiError, OSError) as err:
+        print("Error: %s" % err, file=sys.stderr)
+        return 1
+
+
+DOC_VERBS = ("create", "list", "export", "delete")
+
+
+def run_doc_cli(doc, argv):
+    argv = list(argv or [])
+    if not argv or argv[0] not in DOC_VERBS:
+        print("usage: ee %s {%s} ..." % (doc, ",".join(DOC_VERBS)), file=sys.stderr)
+        return 2
+    verb, rest = argv[0], argv[1:]
+    if verb == "create":
+        return run_invoice_create_cli(rest) if doc == "invoice" else run_payment_create_cli(rest)
+    if verb == "delete":
+        return run_doc_delete_cli(doc, rest)
+    return run_doc_query_cli(doc, verb, rest)
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
     sub, rest = split_subcommand(argv)
+    if sub in ("invoice", "payment"):
+        return run_doc_cli(sub, rest)
     if sub == "create":
         return run_create_cli(rest)
     if sub == "delete":
