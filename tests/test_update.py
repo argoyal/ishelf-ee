@@ -122,6 +122,53 @@ class TestUpdate(unittest.TestCase):
         self.assertEqual(fake.calls, [])
         self.assertIn("would update 1509202603: amount=5", out)
 
+    def test_expect_id_matching_goes_ahead(self):
+        rc, out, _, fake = _run(BASE + ["--expect-id", "9", "--amount", "5"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake.calls[0][0], 9)
+
+    def test_expect_id_mismatch_exits_2_and_sends_nothing(self):
+        # the number now belongs to another expense (the old one was deleted, a new one made that day)
+        rc, out, err, fake = _run(BASE + ["--expect-id", "8", "--amount", "5"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(fake.calls, [])
+        self.assertIn("1509202603", err)
+        self.assertIn("id 9", err)
+        self.assertIn("expected 8", err)
+        self.assertIn("nothing was changed", err)
+
+    def test_expect_id_mismatch_refuses_a_dry_run_too(self):
+        rc, _, err, fake = _run(BASE + ["--expect-id", "8", "--amount", "5", "--dry-run"])
+        self.assertEqual(rc, 2)
+
+    def test_missing_current_amount_is_an_error_not_zero(self):
+        exp = dict(EXPENSE)
+        del exp["amount"]
+        rc, out, err, fake = _run(BASE + ["--notes", "x"], expenses=[exp])
+        self.assertEqual(rc, 1)
+        self.assertEqual(fake.calls, [])
+        self.assertIn("no amount", err)
+        exp["amount"] = None
+        rc, _, _, fake = _run(BASE + ["--notes", "x"], expenses=[exp])
+        self.assertEqual((rc, fake.calls), (1, []))
+
+    def test_a_given_amount_does_not_need_the_current_one(self):
+        exp = dict(EXPENSE, amount=None)
+        rc, _, _, fake = _run(BASE + ["--amount", "5"], expenses=[exp])
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake.calls[0][1]["amount"], 500)
+
+    def test_multipart_update_leaves_out_empty_fields(self):
+        c = ee.InvoiceShelfClient(ee.Config("https://x", "e", "p", "1"))
+        c.token = "tok"
+        with mock.patch.object(c, "_request_multipart", return_value={}) as mp:
+            c.update_expense(9, {"amount": 1, "customer_id": None, "notes": None},
+                             receipt=("r.pdf", b"x", "application/pdf"))
+        data = mp.call_args[0][2]
+        self.assertNotIn(b"None", data)
+        self.assertNotIn(b'name="customer_id"', data)
+        self.assertIn(b'name="amount"\r\n\r\n1', data)
+
     def test_api_error_exits_1(self):
         def boom(self, *a, **k):
             raise ee.ApiError("HTTP 422")

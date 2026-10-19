@@ -117,10 +117,13 @@ sent in minor units; a receipt is uploaded via `multipart/form-data`.
 
 Flags: `--company` and `--expense-number` (required); at least one of `--amount`, `--date`
 (DDMMYYYY), `--category`, `--notes`, `--client`, `--payment-method`, `--receipt`; plus `--config` and
-`--dry-run`. Anything you do not name keeps its current value. On success it prints one line,
+`--dry-run`. `--expect-id ID` makes it refuse (exit 2, nothing sent) unless the expense with that
+number has that id: numbers can repeat after an expense is deleted and another is made for the
+same day. Anything you do not name keeps its current value. On success it prints one line,
 `updated <number>: <field>=<value>, ...` (`would update ...` with `--dry-run`, which changes
-nothing). Exit code 0 on success, 2 if no expense (or more than one) has that number, 1 on an
-API error. Without a receipt it sends `PUT /expenses/{id}`; with one it sends a multipart
+nothing). Exit code 0 on success, 2 if no expense (or more than one) has that number or its id is
+not the expected one, 1 on an API error or when InvoiceShelf returns the expense with no amount
+(it is never sent as 0). Empty fields are left out of the multipart form. Without a receipt it sends `PUT /expenses/{id}`; with one it sends a multipart
 `POST /expenses/{id}` with `_method=PUT` and the file in `attachment_receipt`.
 
 ### `ee delete`

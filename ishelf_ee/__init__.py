@@ -312,7 +312,8 @@ class InvoiceShelfClient:
         if receipt is None:
             return self._request("PUT", path, body=body)
         filename, content, ctype = receipt
-        fields = dict(body)
+        # Leave empty fields out: a multipart form would send None as the text "None".
+        fields = {k: v for k, v in body.items() if v is not None}
         fields["_method"] = "PUT"
         data, content_type = encode_multipart(
             fields, file_field=("attachment_receipt", filename, content, ctype))
@@ -1035,6 +1036,9 @@ def build_update_parser():
                    help="Company the expense belongs to (expense numbers are company-scoped).")
     p.add_argument("--expense-number", dest="expense_number", required=True,
                    help="The expense_number to change (e.g. 1509202603).")
+    p.add_argument("--expect-id", dest="expect_id", default=None,
+                   help="Refuse (exit 2, nothing sent) unless the expense with this number has "
+                        "this id. Expense numbers can repeat after a delete; the id never does.")
     p.add_argument("--amount", default=None, help="New amount, in the expense's own currency.")
     p.add_argument("--date", default=None, help="New expense date, DDMMYYYY.")
     p.add_argument("--category", default=None, help="New expense category name.")
@@ -1053,8 +1057,16 @@ def build_update_parser():
 _UPDATE_FIELDS = ("amount", "date", "category", "notes", "client", "payment_method", "receipt")
 
 
-def _current_expense_body(exp):
-    """The expense's present values in the shape InvoiceShelf wants back on update."""
+def _current_expense_body(exp, need_amount=True):
+    """The expense's present values in the shape InvoiceShelf wants back on update. Raises
+    ValueError when the expense came back with no amount (unless a new one is given), so an update
+    can never set it to 0 by accident."""
+    amount = exp.get("amount")
+    if amount in (None, ""):
+        if need_amount:
+            raise ValueError("expense %s came back from InvoiceShelf with no amount; nothing was "
+                             "changed (pass --amount to set it)" % exp.get("expense_number"))
+        amount = 0
     currency_id = exp.get("currency_id")
     if currency_id is None:
         currency_id = (exp.get("currency") or {}).get("id")
@@ -1065,7 +1077,7 @@ def _current_expense_body(exp):
     if customer_id is None:
         customer_id = (exp.get("customer") or {}).get("id")
     return build_expense_body(
-        expense_date=exp.get("expense_date"), amount_minor=exp.get("amount") or 0,
+        expense_date=exp.get("expense_date"), amount_minor=amount,
         category_id=category_id, currency_id=currency_id, notes=exp.get("notes"),
         customer_id=customer_id, exchange_rate=exp.get("exchange_rate"),
         expense_number=exp.get("expense_number"),
@@ -1088,7 +1100,12 @@ def run_update_cli(argv=None):
         except LookupError as err:
             print("Error: %s" % err, file=sys.stderr)
             return 2
-        body = _current_expense_body(exp)
+        if args.expect_id is not None and str(exp.get("id")) != str(args.expect_id).strip():
+            print("Error: expense %s is now id %s, expected %s (it may have been deleted and the "
+                  "number reused); nothing was changed" % (args.expense_number, exp.get("id"), args.expect_id),
+                  file=sys.stderr)
+            return 2
+        body = _current_expense_body(exp, need_amount=args.amount is None)
         changes = []
         if args.amount is not None:
             precision = (exp.get("currency") or {}).get("precision")
