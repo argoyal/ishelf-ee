@@ -107,6 +107,22 @@ default), and `--dry-run`.
 `--dry-run` prints the exact `POST /expenses` body without writing anything. Amounts are
 sent in minor units; a receipt is uploaded via `multipart/form-data`.
 
+### `ee update`
+
+`ee update` changes one expense, or attaches a receipt to it. The expense is found by its
+**expense number** (company-scoped, so `--company` is required):
+
+    ee update --company "Arpit Goyal" --expense-number 1509202603 --amount 2400.52
+    ee update --company "Arpit Goyal" --expense-number 1509202603 --receipt ~/Downloads/bill.pdf
+
+Flags: `--company` and `--expense-number` (required); at least one of `--amount`, `--date`
+(DDMMYYYY), `--category`, `--notes`, `--client`, `--payment-method`, `--receipt`; plus `--config` and
+`--dry-run`. Anything you do not name keeps its current value. On success it prints one line,
+`updated <number>: <field>=<value>, ...` (`would update ...` with `--dry-run`, which changes
+nothing). Exit code 0 on success, 2 if no expense (or more than one) has that number, 1 on an
+API error. Without a receipt it sends `PUT /expenses/{id}`; with one it sends a multipart
+`POST /expenses/{id}` with `_method=PUT` and the file in `attachment_receipt`.
+
 ### `ee delete`
 
 `ee delete` removes a single expense by its **expense number** (numbers are company-scoped, so

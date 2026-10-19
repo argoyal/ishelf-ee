@@ -305,6 +305,19 @@ class InvoiceShelfClient:
             file_field=("attachment_receipt", filename, content, ctype))
         return self._request_multipart("POST", "/expenses", data, content_type)
 
+    def update_expense(self, expense_id, body, receipt=None):
+        """Change one expense. Plain PUT with JSON; with a receipt, a multipart POST that
+        carries _method=PUT (PHP does not read multipart bodies on a real PUT)."""
+        path = "/expenses/%s" % expense_id
+        if receipt is None:
+            return self._request("PUT", path, body=body)
+        filename, content, ctype = receipt
+        fields = dict(body)
+        fields["_method"] = "PUT"
+        data, content_type = encode_multipart(
+            fields, file_field=("attachment_receipt", filename, content, ctype))
+        return self._request_multipart("POST", path, data, content_type)
+
     def delete_expenses(self, ids):
         # InvoiceShelf deletes expenses via POST /expenses/delete with an ids array
         # (the canonical, tested endpoint; the RESTful destroy route also exists).
@@ -735,7 +748,7 @@ def format_table(rows, columns):
     return "\n".join(line.rstrip() for line in lines)
 
 
-SUBCOMMANDS = ("export", "create", "delete", "invoice", "payment")
+SUBCOMMANDS = ("export", "create", "update", "delete", "invoice", "payment")
 
 
 def split_subcommand(argv):
@@ -1007,6 +1020,106 @@ def run_create_cli(argv=None):
         out = client.create_expense(body, receipt=receipt)
         exp = out.get("data") or out
         print("Created expense id: %s" % exp.get("id"))
+        return 0
+    except (ValueError, LookupError, ApiError, OSError) as err:
+        print("Error: %s" % err, file=sys.stderr)
+        return 1
+
+
+def build_update_parser():
+    p = argparse.ArgumentParser(
+        prog="ee update",
+        description="Change one expense in InvoiceShelf (found by its expense number), "
+                    "or attach a receipt to it. Anything you do not name stays as it is.")
+    p.add_argument("--company", required=True,
+                   help="Company the expense belongs to (expense numbers are company-scoped).")
+    p.add_argument("--expense-number", dest="expense_number", required=True,
+                   help="The expense_number to change (e.g. 1509202603).")
+    p.add_argument("--amount", default=None, help="New amount, in the expense's own currency.")
+    p.add_argument("--date", default=None, help="New expense date, DDMMYYYY.")
+    p.add_argument("--category", default=None, help="New expense category name.")
+    p.add_argument("--notes", default=None, help="New notes text.")
+    p.add_argument("--client", "--customer", dest="client", default=None,
+                   help="New client/customer name.")
+    p.add_argument("--payment-method", dest="payment_method", default=None,
+                   help="New payment method name.")
+    p.add_argument("--receipt", default=None, help="Path to a receipt file to attach.")
+    p.add_argument("--config", default=None)
+    p.add_argument("--dry-run", action="store_true",
+                   help="Show what would change; change nothing.")
+    return p
+
+
+_UPDATE_FIELDS = ("amount", "date", "category", "notes", "client", "payment_method", "receipt")
+
+
+def _current_expense_body(exp):
+    """The expense's present values in the shape InvoiceShelf wants back on update."""
+    currency_id = exp.get("currency_id")
+    if currency_id is None:
+        currency_id = (exp.get("currency") or {}).get("id")
+    category_id = exp.get("expense_category_id")
+    if category_id is None:
+        category_id = (exp.get("expense_category") or exp.get("category") or {}).get("id")
+    customer_id = exp.get("customer_id")
+    if customer_id is None:
+        customer_id = (exp.get("customer") or {}).get("id")
+    return build_expense_body(
+        expense_date=exp.get("expense_date"), amount_minor=exp.get("amount") or 0,
+        category_id=category_id, currency_id=currency_id, notes=exp.get("notes"),
+        customer_id=customer_id, exchange_rate=exp.get("exchange_rate"),
+        expense_number=exp.get("expense_number"),
+        payment_method_id=exp.get("payment_method_id"))
+
+
+def run_update_cli(argv=None):
+    parser = build_update_parser()
+    args = parser.parse_args(argv)
+    if all(getattr(args, f) is None for f in _UPDATE_FIELDS):
+        parser.error("give at least one thing to change: --amount, --date, --category, "
+                     "--notes, --client, --payment-method or --receipt")
+    try:
+        config = load_config(find_config_file(args.config))
+        client = InvoiceShelfClient(config)
+        client.login()
+        client.company_id = resolve_company_id(client, args.company)
+        try:
+            exp = resolve_expense_by_number(client, args.expense_number)
+        except LookupError as err:
+            print("Error: %s" % err, file=sys.stderr)
+            return 2
+        body = _current_expense_body(exp)
+        changes = []
+        if args.amount is not None:
+            precision = (exp.get("currency") or {}).get("precision")
+            body["amount"] = amount_to_minor(args.amount, 2 if precision in (None, "") else precision)
+            changes.append("amount=%s" % args.amount)
+        if args.date is not None:
+            body["expense_date"] = to_api_date(parse_ddmmyyyy(args.date))
+            changes.append("date=%s" % args.date)
+        if args.category is not None:
+            body["expense_category_id"] = resolve_category_id(client, args.category)
+            changes.append("category=%s" % args.category)
+        if args.notes is not None:
+            body["notes"] = args.notes
+            changes.append("notes=%s" % args.notes)
+        if args.client is not None:
+            body["customer_id"] = resolve_customer_id(client, args.client)
+            changes.append("client=%s" % args.client)
+        if args.payment_method is not None:
+            body["payment_method_id"] = resolve_payment_method_id(client, args.payment_method)
+            changes.append("payment_method=%s" % args.payment_method)
+        receipt = None
+        if args.receipt is not None:
+            with open(args.receipt, "rb") as f:
+                receipt = (os.path.basename(args.receipt), f.read(), "application/octet-stream")
+            changes.append("receipt=%s" % os.path.basename(args.receipt))
+        summary = "%s: %s" % (args.expense_number, ", ".join(changes))
+        if args.dry_run:
+            print("would update " + summary)
+            return 0
+        client.update_expense(exp.get("id"), body, receipt=receipt)
+        print("updated " + summary)
         return 0
     except (ValueError, LookupError, ApiError, OSError) as err:
         print("Error: %s" % err, file=sys.stderr)
@@ -1335,6 +1448,8 @@ def main(argv=None):
         return run_doc_cli(sub, rest)
     if sub == "create":
         return run_create_cli(rest)
+    if sub == "update":
+        return run_update_cli(rest)
     if sub == "delete":
         return run_delete_cli(rest)
     return run_export_cli(rest)
