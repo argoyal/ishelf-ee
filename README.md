@@ -1,8 +1,22 @@
-# ishelf-ee — InvoiceShelf Expense Exporter
+# ishelf-ee — InvoiceShelf from the command line
 
-Export a client's expenses from a self-hosted InvoiceShelf (2.4.1) instance to CSV,
-and bundle their receipts into a zip. Zero runtime dependencies (Python standard
+Work with a self-hosted [InvoiceShelf](https://github.com/InvoiceShelf/InvoiceShelf) (2.4.1)
+instance from your terminal or scripts: report and log expenses with their receipts, create
+invoices, and record the payments you receive. Zero runtime dependencies (Python standard
 library only). Installs the `ee` command.
+
+What `ee` can do:
+
+| | commands |
+|---|---|
+| Expenses | `ee` / `ee export` (CSV + receipts zip for a client and date range, or everything), `ee create`, `ee update`, `ee delete` |
+| Invoices | `ee invoice create`, `list`, `export`, `delete` |
+| Payments received | `ee payment create`, `list`, `export`, `delete` |
+
+Every command that changes data takes `--dry-run`, which shows what would be sent and changes
+nothing. Names (company, client, category, currency, payment method) are looked up for you, so
+you never deal with ids. Foreign-currency invoices and payments can be booked at the exact
+amount your bank credited in your own currency (`--inr-amount`).
 
 ## Install
 
@@ -36,7 +50,7 @@ Copy the template and fill it in:
 
     mkdir -p ~/.config/ishelf-ee
     curl -o ~/.config/ishelf-ee/config.env \
-      https://raw.githubusercontent.com/<you>/ishelf-ee/main/config.env.example
+      https://raw.githubusercontent.com/argoyal/ishelf-ee/main/config.env.example
     # then edit ~/.config/ishelf-ee/config.env
 
 The config file is discovered in this order (first match wins):
@@ -49,7 +63,7 @@ The config file is discovered in this order (first match wins):
 
 Environment variables always override file values.
 
-## Usage
+## Export expenses
 
     ee --client "Acme Corp" --start 01042025 --end 30062025
     ee --company "My Company" --client "Acme Corp" --start 01042025 --end 30062025

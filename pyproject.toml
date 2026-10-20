@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ishelf-ee"
 version = "0.7.0"
-description = "InvoiceShelf from the command line: export and log expenses (with receipts), create invoices and record payments."
+description = "InvoiceShelf from the command line: report, log, update and delete expenses (with receipts), create invoices and record payments."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
